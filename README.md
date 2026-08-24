@@ -4,8 +4,6 @@
 Rust development microVMs with Codex, Claude, Pi, and native VS Code Remote-SSH.
 Its default preset is the complete multi-agent environment.
 
-To build `sbxr` or contribute a feature, see the
-[development guide](DEVELOPMENT.md).
 
 ## Quick start
 
@@ -31,6 +29,29 @@ sbxr new .
 `setup` explains how to install any missing system prerequisite and can be
 rerun safely. An existing Rust project directory works in place of the empty
 directory above; an empty directory is initialized with Cargo automatically.
+
+
+## Prerequisites
+
+- A host supported by [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/install/),
+  with the required virtualization support (KVM on Linux).
+- The Docker Sandboxes `sbx` CLI. Follow Docker's official
+  [installation and sign-in guide](https://docs.docker.com/ai/sandboxes/install/).
+  Docker Desktop and Docker Engine are not required just to use `sbx`.
+- Rust and Cargo 1.85 or newer to build and install `sbxr` from source.
+- Native VS Code with the `code` command on `PATH`, plus an OpenSSH client.
+- Git is recommended and is required for `sbxr review`.
+- A ChatGPT subscription, Claude subscription, or both, depending on the
+  selected preset. Authentication uses the providers' OAuth login flows; API
+  keys are not required.
+
+`sbxr setup` configures Docker sign-in, agent OAuth, and VS Code Remote-SSH
+when needed. It reports missing host software with installation guidance, but
+does not install system packages or invoke `sudo`.
+
+To build `sbxr` or contribute a feature, see the
+[development guide](DEVELOPMENT.md).
+
 
 ## What it includes
 
