@@ -1,0 +1,183 @@
+schemaVersion: "2"
+kind: mixin
+name: rust
+version: "1.98.0"
+displayName: Rust development toolchain
+description: A pinned stable Rust toolchain with rustfmt, Clippy, rust-src, rust-analyzer, LLDB, cargo-vet, cargo-deny, and cargo-audit.
+sourceURL: https://github.com/docker/sbx-kits-contrib
+
+security:
+  privileged: false
+
+permissions:
+  network:
+    allow:
+      # Ubuntu package metadata and native build/debug dependencies. The shell
+      # template carries both Ubuntu and Docker apt sources, so apt-get update
+      # must be able to refresh all of them. ports.ubuntu.com covers arm64.
+      - archive.ubuntu.com:80
+      - security.ubuntu.com:80
+      - ports.ubuntu.com:80
+      - download.docker.com:443
+      # Pinned rustup-init and the pinned Rust toolchain/components.
+      - static.rust-lang.org:443
+      # Cargo sparse index, crate downloads, and the public registry API used
+      # by cargo-vet/cargo-audit during normal operation.
+      - index.crates.io:443
+      - static.crates.io:443
+      - crates.io:443
+      # cargo-audit and cargo-deny refresh the RustSec advisory database from
+      # https://github.com/RustSec/advisory-db. sbx policies are host-granular,
+      # so this necessarily permits other HTTPS paths on github.com too.
+      - github.com:443
+      # Redirect target for the checksum-pinned cargo-audit quickinstall
+      # release artifact hosted by GitHub.
+      - release-assets.githubusercontent.com:443
+
+environment:
+  variables:
+    CARGO_HOME: /home/agent/.cargo
+    RUSTUP_HOME: /home/agent/.rustup
+
+setup:
+  install:
+    - command: |
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          build-essential \
+          ca-certificates \
+          clang \
+          cmake \
+          curl \
+          git \
+          libclang-dev \
+          libssl-dev \
+          lldb \
+          pkg-config \
+          xz-utils
+        rm -rf /var/lib/apt/lists/*
+      user: "0"
+      description: Install native Rust build and LLDB prerequisites
+
+    - command: |
+        set -euo pipefail
+        mkdir -p /home/agent/.cargo/registry /home/agent/.cargo/git /home/agent/.rustup
+        chown -R agent:agent /home/agent/.cargo /home/agent/.rustup
+      user: "0"
+      description: Make persistent Rust toolchain and Cargo cache volumes agent-owned
+
+    - command: |
+        set -euo pipefail
+        export CARGO_HOME=/home/agent/.cargo
+        export RUSTUP_HOME=/home/agent/.rustup
+        export PATH="$CARGO_HOME/bin:$PATH"
+
+        RUSTUP_VERSION=1.29.0
+        case "$(uname -m)" in
+          x86_64|amd64)
+            TARGET=x86_64-unknown-linux-gnu
+            SHA256=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
+            ;;
+          aarch64|arm64)
+            TARGET=aarch64-unknown-linux-gnu
+            SHA256=9732d6c5e2a098d3521fca8145d826ae0aaa067ef2385ead08e6feac88fa5792
+            ;;
+          *)
+            echo "unsupported sandbox architecture: $(uname -m)" >&2
+            exit 1
+            ;;
+        esac
+
+        if [ ! -x "$CARGO_HOME/bin/rustup" ]; then
+          URL="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${TARGET}/rustup-init"
+          curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/rustup-init "$URL"
+          echo "$SHA256  /tmp/rustup-init" | sha256sum -c -
+          chmod 0755 /tmp/rustup-init
+          /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain none
+          rm -f /tmp/rustup-init
+        fi
+
+        rustup toolchain install 1.98.0 --profile minimal
+        rustup component add --toolchain 1.98.0 rustfmt clippy rust-src rust-analyzer
+        rustup default 1.98.0
+        rustc --version
+        cargo --version
+      user: "1000"
+      description: Install rustup 1.29.0 and pinned Rust 1.98.0 components
+
+    # Keep source builds in separate hooks: sbx bounds each install hook's
+    # execution time. The job setting applies only while provisioning, not to
+    # developers' builds.
+    - command: |
+        set -euo pipefail
+        export CARGO_HOME=/home/agent/.cargo
+        export RUSTUP_HOME=/home/agent/.rustup
+        export PATH="$CARGO_HOME/bin:$PATH"
+        export CARGO_BUILD_JOBS=16
+        cargo-vet --version 2>/dev/null | grep -Fq 0.10.2 || \
+          cargo install --locked cargo-vet --version 0.10.2
+      user: "1000"
+      description: Install pinned cargo-vet 0.10.2
+
+    - command: |
+        set -euo pipefail
+        export CARGO_HOME=/home/agent/.cargo
+        export RUSTUP_HOME=/home/agent/.rustup
+        export PATH="$CARGO_HOME/bin:$PATH"
+        export CARGO_BUILD_JOBS=16
+        cargo-deny --version 2>/dev/null | grep -Fq 0.20.2 || \
+          cargo install --locked cargo-deny --version 0.20.2
+      user: "1000"
+      description: Install pinned cargo-deny 0.20.2
+
+    - command: |
+        set -euo pipefail
+        export CARGO_HOME=/home/agent/.cargo
+        export PATH="$CARGO_HOME/bin:$PATH"
+        if ! cargo-audit --version 2>/dev/null | grep -Fq 0.22.2; then
+          case "$(uname -m)" in
+            x86_64)
+              TARGET=x86_64-unknown-linux-gnu
+              SHA256=a2dc84bc76c3faa1a8115719d62adebe0bd4d65effa83340f0c3f7e2f7012709
+              ;;
+            aarch64|arm64)
+              TARGET=aarch64-unknown-linux-gnu
+              SHA256=4d6b2397d5c0260ee813c312d340c5631e0bf95e0637596cca8588a92bf4439f
+              ;;
+            *)
+              echo "unsupported architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          ARCHIVE=/tmp/cargo-audit.tar.gz
+          URL="https://github.com/cargo-bins/cargo-quickinstall/releases/download/cargo-audit-0.22.2/cargo-audit-0.22.2-${TARGET}.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$ARCHIVE" "$URL"
+          echo "$SHA256  $ARCHIVE" | sha256sum -c -
+          tar -xzf "$ARCHIVE" -C "$CARGO_HOME/bin" cargo-audit
+          chmod 0755 "$CARGO_HOME/bin/cargo-audit"
+          rm -f "$ARCHIVE"
+        fi
+        cargo-audit --version | grep -F 0.22.2
+      user: "1000"
+      description: Install checksum-pinned cargo-audit 0.22.2 quickinstall binary
+
+    - command: |
+        set -euo pipefail
+        for tool in \
+          cargo cargo-audit cargo-clippy cargo-deny cargo-vet clippy-driver \
+          rust-analyzer rustc rustdoc rustfmt rustup; do
+          test -e "/home/agent/.cargo/bin/$tool"
+          ln -sfn "/home/agent/.cargo/bin/$tool" "/usr/local/bin/$tool"
+        done
+      user: "0"
+      description: Expose Rust commands to login and non-interactive shells
+
+volumes:
+  - path: /home/agent/.cargo/registry
+    size: 4g
+  - path: /home/agent/.cargo/git
+    size: 2g
+  - path: /home/agent/.rustup
+    size: 8g

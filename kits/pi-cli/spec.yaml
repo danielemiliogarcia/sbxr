@@ -1,0 +1,161 @@
+schemaVersion: "2"
+kind: mixin
+name: pi-cli
+version: "0.84.2"
+displayName: Pi coding agent CLI
+description: Adds pinned Pi with native subscription OAuth and Docker-managed Codex OAuth detection.
+sourceURL: https://github.com/earendil-works/pi
+
+security:
+  privileged: false
+
+permissions:
+  network:
+    allow:
+      - registry.npmjs.org:443
+      - api.anthropic.com:443
+      - platform.claude.com:443
+      - claude.ai:443
+      - auth.openai.com:443
+      - chatgpt.com:443
+
+environment:
+  variables:
+    PI_SKIP_VERSION_CHECK: "1"
+    PI_TELEMETRY: "0"
+
+setup:
+  install:
+    - command: |
+        set -euo pipefail
+        mkdir -p /home/agent/.pi/agent
+        chown -R agent:agent /home/agent/.pi
+      user: "0"
+      description: Make the persistent Pi state volume agent-owned
+
+    - command: |
+        set -euo pipefail
+        if [ -n "${HTTP_PROXY:-}" ]; then npm config set proxy "$HTTP_PROXY"; fi
+        if [ -n "${HTTPS_PROXY:-}" ]; then npm config set https-proxy "$HTTPS_PROXY"; fi
+        if ! pi --version 2>/dev/null | grep -Fq '0.84.2'; then
+          npm install -g --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent@0.84.2
+        fi
+        pi --version
+      user: "1000"
+      description: Install pinned Pi without lifecycle scripts
+
+    - command: |
+        set -euo pipefail
+        mkdir -p /home/agent/.pi/agent
+        if [ ! -f /home/agent/.pi/agent/settings.json ]; then
+          printf '%s\n' '{"defaultProjectTrust":"never","enableInstallTelemetry":false}' > /home/agent/.pi/agent/settings.json
+          chmod 0600 /home/agent/.pi/agent/settings.json
+        fi
+      user: "1000"
+      description: Disable telemetry and default project-local extensions to untrusted
+
+    - command: |
+        set -euo pipefail
+        PREFIX=$(npm config get prefix)
+        TARGET="$PREFIX/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js"
+        node - "$TARGET" <<'NODE'
+        const fs = require("fs");
+        const path = process.argv[2];
+        let source = fs.readFileSync(path, "utf8");
+        const original = "function extractAccountId(token) {\n    try {";
+        const patched = 'function extractAccountId(token) {\n    if (token === "oai-oat01-proxy-managed") return "proxy-managed";\n    try {';
+        if (!source.includes("oai-oat01-proxy-managed")) {
+          if (!source.includes(original)) throw new Error("pinned Pi proxy patch target was not found");
+          source = source.replace(original, patched);
+          fs.writeFileSync(path, source);
+        }
+        NODE
+        if [ "${SBX_CRED_OPENAI_MODE:-}" = oauth ]; then
+          node <<'NODE'
+        const fs = require("fs");
+        const path = "/home/agent/.pi/agent/auth.json";
+        let auth = {};
+        try { auth = JSON.parse(fs.readFileSync(path, "utf8")); } catch {}
+        if (!auth["openai-codex"] || auth["openai-codex"].source === "docker-sbx-proxy") {
+          auth["openai-codex"] = {
+            type: "oauth",
+            access: "oai-oat01-proxy-managed",
+            refresh: "proxy-managed",
+            expires: 4102444800000,
+            accountId: "proxy-managed",
+            source: "docker-sbx-proxy"
+          };
+          fs.writeFileSync(path, JSON.stringify(auth, null, 2) + "\n", { mode: 0o600 });
+        }
+        NODE
+        fi
+      user: "1000"
+      description: Let Pi detect Docker host-managed ChatGPT subscription OAuth without exposing its token
+
+    - command: |
+        set -euo pipefail
+        PREFIX=$(npm config get prefix)
+        PACKAGE="$PREFIX/lib/node_modules/@earendil-works/pi-coding-agent"
+        REAL="$PACKAGE/dist/cli.js"
+        BRIDGE="$PACKAGE/dist/rust-sbx-claude-auth-bridge.cjs"
+        SHIM="$PREFIX/bin/pi"
+        test -f "$REAL"
+        cat > "$BRIDGE" <<'NODE'
+        const fs = require("fs");
+        const path = require("path");
+        const mode = process.argv[2];
+        const home = process.env.HOME || "/home/agent";
+        const claudePath = path.join(home, ".claude", ".credentials.json");
+        const piDir = path.join(home, ".pi", "agent");
+        const piPath = path.join(piDir, "auth.json");
+        const marker = path.join(piDir, ".rust-sbx-claude-bridge");
+        const read = (file) => { try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return {}; } };
+        const write = (file, value) => {
+          fs.mkdirSync(path.dirname(file), { recursive: true });
+          fs.writeFileSync(file, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 });
+          fs.chmodSync(file, 0o600);
+        };
+        if (mode === "before") {
+          const claude = read(claudePath);
+          const oauth = claude.claudeAiOauth;
+          const pi = read(piPath);
+          if (oauth?.accessToken && oauth?.refreshToken && (!pi.anthropic || fs.existsSync(marker))) {
+            pi.anthropic = {
+              type: "oauth",
+              access: oauth.accessToken,
+              refresh: oauth.refreshToken,
+              expires: oauth.expiresAt || 0
+            };
+            write(piPath, pi);
+            fs.writeFileSync(marker, "shared-with-claude-code\n", { mode: 0o600 });
+          }
+        } else if (mode === "after" && fs.existsSync(marker)) {
+          const pi = read(piPath);
+          if (pi.anthropic?.access && pi.anthropic?.refresh) {
+            const claude = read(claudePath);
+            claude.claudeAiOauth = {
+              ...(claude.claudeAiOauth || {}),
+              accessToken: pi.anthropic.access,
+              refreshToken: pi.anthropic.refresh,
+              expiresAt: pi.anthropic.expires || 0
+            };
+            write(claudePath, claude);
+          }
+        }
+        NODE
+        chmod 0600 "$BRIDGE"
+        rm -f "$SHIM"
+        printf '%s\n' \
+          '#!/bin/sh' \
+          "node '$BRIDGE' before" \
+          "node '$REAL' \"\$@\"" \
+          'status=$?' \
+          "node '$BRIDGE' after || true" \
+          'exit "$status"' > "$SHIM"
+        chmod 0755 "$SHIM"
+      user: "1000"
+      description: Detect and safely reconcile a sandbox-local Claude subscription login for Pi
+
+volumes:
+  - path: /home/agent/.pi/agent
+    size: 2g

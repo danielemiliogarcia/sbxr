@@ -1,0 +1,51 @@
+schemaVersion: "2"
+kind: mixin
+name: rocksdb-host
+version: "0.1.0"
+displayName: Host RocksDB dynamic-link support
+description: Configures an explicitly mounted, read-only host RocksDB prefix and sandbox-native compression libraries.
+sourceURL: https://github.com/rust-rocksdb/rust-rocksdb
+
+security:
+  privileged: false
+
+environment:
+  variables:
+    SNAPPY_LIB_DIR: /opt/rust-sbx-system-libs
+
+setup:
+  install:
+    - command: |
+        set -euo pipefail
+        if [ -z "${ROCKSDB_LIB_DIR:-}" ] || [ -z "${ROCKSDB_INCLUDE_DIR:-}" ]; then
+          echo "note: rocksdb-host is inactive without the explicit launcher environment"
+          exit 0
+        fi
+        test -r "$ROCKSDB_LIB_DIR/librocksdb.so"
+        test -r "$ROCKSDB_INCLUDE_DIR/rocksdb/c.h"
+
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          libbz2-dev \
+          liblz4-dev \
+          libsnappy-dev \
+          libzstd-dev \
+          zlib1g-dev
+        rm -rf /var/lib/apt/lists/*
+
+        multiarch=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
+        system_lib_dir="/usr/lib/$multiarch"
+        test -r "$system_lib_dir/libsnappy.so"
+        mkdir -p /opt/rust-sbx-system-libs
+        ln -sfn "$system_lib_dir/libsnappy.so" /opt/rust-sbx-system-libs/libsnappy.so
+
+        printf '%s\n' "$ROCKSDB_LIB_DIR" > /etc/ld.so.conf.d/rust-sbx-rocksdb.conf
+        ldconfig
+        if ldd "$ROCKSDB_LIB_DIR/librocksdb.so" | grep -Fq 'not found'; then
+          echo "host RocksDB has unresolved sandbox runtime dependencies" >&2
+          ldd "$ROCKSDB_LIB_DIR/librocksdb.so" >&2
+          exit 1
+        fi
+      user: "0"
+      description: Validate the read-only RocksDB mount and install compatible runtime libraries

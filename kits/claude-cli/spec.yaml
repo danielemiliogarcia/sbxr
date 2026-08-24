@@ -1,0 +1,100 @@
+schemaVersion: "2"
+kind: mixin
+name: claude-cli
+version: "2.1.239"
+displayName: Claude Code CLI
+description: Adds pinned Claude Code with persistent native Claude subscription authentication.
+sourceURL: https://github.com/anthropics/claude-code
+
+security:
+  privileged: false
+
+permissions:
+  network:
+    allow:
+      - registry.npmjs.org:443
+      - api.anthropic.com:443
+      - console.anthropic.com:443
+      - claude.ai:443
+      - platform.claude.com:443
+      - downloads.claude.ai:443
+      - claude.com:443
+      - mcp-proxy.anthropic.com:443
+      - bridge.claudeusercontent.com:443
+
+environment:
+  variables:
+    IS_SANDBOX: "1"
+    DISABLE_AUTOUPDATER: "1"
+
+setup:
+  install:
+    - command: |
+        set -euo pipefail
+        mkdir -p \
+          /home/agent/.claude/projects \
+          /home/agent/.claude/sessions \
+          /home/agent/.claude/todos \
+          /home/agent/.claude/shell-snapshots \
+          /home/agent/.claude/statsig
+        chown -R agent:agent /home/agent/.claude
+      user: "0"
+      description: Make the persistent Claude configuration and session volume agent-owned
+
+    - command: |
+        set -euo pipefail
+        if [ -n "${HTTP_PROXY:-}" ]; then npm config set proxy "$HTTP_PROXY"; fi
+        if [ -n "${HTTPS_PROXY:-}" ]; then npm config set https-proxy "$HTTPS_PROXY"; fi
+        if ! claude --version 2>/dev/null | grep -Fq '2.1.239'; then
+          npm install -g --no-audit --no-fund @anthropic-ai/claude-code@2.1.239
+        fi
+        PREFIX=$(npm config get prefix)
+        REAL="$PREFIX/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+        SHIM="$PREFIX/bin/claude"
+        test -x "$REAL"
+        rm -f "$SHIM"
+        printf '%s\n' \
+          '#!/bin/sh' \
+          '# Claude gives API-key variables precedence over subscription OAuth.' \
+          '# Remove the shell base kit proxy binding for this CLI only.' \
+          'unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL SBX_CRED_ANTHROPIC_MODE' \
+          "exec \"$REAL\" \"\$@\"" > "$SHIM"
+        chmod 0755 "$SHIM"
+        claude --version
+      user: "1000"
+      description: Install pinned Claude Code and isolate it from the shell API-key proxy
+
+    - command: |
+        set -euo pipefail
+        ws="${WORKSPACE_DIR:-/}"
+        esc=$(printf '%s' "$ws" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\r/\\r/g')
+        projects='"/": { "hasTrustDialogAccepted": true }'
+        if [ "$ws" != / ]; then
+          projects="$projects, \"$esc\": { \"hasTrustDialogAccepted\": true }"
+        fi
+        printf '%s\n' "{
+          \"bypassPermissionsModeAccepted\": true,
+          \"hasCompletedOnboarding\": true,
+          \"projects\": { $projects }
+        }" > /home/agent/.claude.json
+        chown agent:agent /home/agent/.claude.json
+        chmod 0600 /home/agent/.claude.json
+      user: "0"
+      description: Seed Claude onboarding and workspace trust flags
+
+    - command: |
+        set -euo pipefail
+        mkdir -p /home/agent/.claude
+        printf '%s\n' "{
+          \"themeId\": 1,
+          \"alwaysThinkingEnabled\": true,
+          \"defaultMode\": \"bypassPermissions\",
+          \"bypassPermissionsModeAccepted\": true
+        }" > /home/agent/.claude/settings.json
+        chmod 0600 /home/agent/.claude/settings.json
+      user: "1000"
+      description: Seed Claude settings without an API-key helper
+
+volumes:
+  - path: /home/agent/.claude
+    size: 4g

@@ -1,0 +1,21 @@
+schemaVersion: "2"
+kind: mixin
+name: vscode-remote
+version: "1.0.0"
+displayName: VS Code Remote-SSH network access
+description: Minimal VS Code Server and extension-marketplace endpoints for a deny-all sandbox.
+sourceURL: https://code.visualstudio.com/docs/remote/ssh
+
+security:
+  privileged: false
+
+permissions:
+  network:
+    allow:
+      - update.code.visualstudio.com:443
+      - vscode.download.prss.microsoft.com:443
+      - marketplace.visualstudio.com:443
+      - "*.gallery.vsassets.io:443"
+      - "*.gallerycdn.vsassets.io:443"
+      - "*.vscode-cdn.net:443"
+      - "*.vscode-unpkg.net:443"
