@@ -16,8 +16,8 @@ over equivalent environment variables.
 | `SBXR_SYNC_AGENT_CONFIG` | `0` to disable | Safe Codex, Claude, and Pi capability mirroring is enabled |
 | `SBXR_SYNC_VSCODE_EXTENSIONS` | `0` to disable | Host VS Code extension mirroring is enabled |
 | `SBXR_SYNC_PI_EXTENSIONS` | `0` or `1` | Unset means executable Pi extensions/packages are copied only when host and sandbox Pi versions match |
-| `SBXR_CLAUDE_AUTH_FILE` | File path | `~/.claude/.credentials.json`; used only by `auth-import` |
-| `SBXR_YES` | `1` to confirm | `auth-import` requires an interactive confirmation |
+| `SBXR_CLAUDE_AUTH_FILE` | File path | `~/.claude/.credentials.json`; used by the first-open import offer and `auth-import` |
+| `SBXR_YES` | `1` to confirm | Automatically accepts the first-open Claude import offer and non-interactive `auth-import` |
 | `SBXR_PRESERVE_XDG_STATE_HOME` | `1` to preserve | `XDG_STATE_HOME` is removed from child `sbx` and VS Code commands |
 
 Values other than the documented control value generally behave like the
@@ -110,7 +110,7 @@ SBXR_SYNC_PI_EXTENSIONS=1 sbxr new .  # force-enable them
 ## Authentication import variables
 
 `SBXR_CLAUDE_AUTH_FILE` selects a trusted host Claude OAuth cache for the
-explicit `auth-import` command:
+first-open import offer and the explicit `auth-import` command:
 
 ```bash
 SBXR_CLAUDE_AUTH_FILE=/secure/path/claude-credentials.json \

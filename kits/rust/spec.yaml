@@ -174,6 +174,39 @@ setup:
       user: "0"
       description: Expose Rust commands to login and non-interactive shells
 
+    - command: |
+        set -euo pipefail
+        mkdir -p /home/agent/.config/sbxr
+        cat > /home/agent/.config/sbxr/bash-prompt.bash <<'SBXR_PROMPT'
+        # Managed by sbxr. This file is safe to source more than once.
+        __sbxr_git_branch() {
+          local branch
+          branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || \
+            branch=$(git rev-parse --short HEAD 2>/dev/null) || return 0
+          printf ' (%s)' "$branch"
+        }
+
+        case "${TERM:-dumb}" in
+          dumb)
+            PS1='\u@\h:\w$(__sbxr_git_branch)\$ '
+            ;;
+          *)
+            PS1='\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[01;33m\]$(__sbxr_git_branch)\[\033[00m\]\$ '
+            ;;
+        esac
+        SBXR_PROMPT
+        touch /home/agent/.bashrc
+        if ! grep -Fq '.config/sbxr/bash-prompt.bash' /home/agent/.bashrc; then
+          printf '%s\n' \
+            '' \
+            '# sbxr interactive prompt' \
+            '[ -f "$HOME/.config/sbxr/bash-prompt.bash" ] && . "$HOME/.config/sbxr/bash-prompt.bash"' \
+            >> /home/agent/.bashrc
+        fi
+        chown -R agent:agent /home/agent/.config/sbxr /home/agent/.bashrc
+      user: "0"
+      description: Install a colored interactive Bash prompt with Git branch
+
 volumes:
   - path: /home/agent/.cargo/registry
     size: 4g

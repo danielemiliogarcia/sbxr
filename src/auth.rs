@@ -20,23 +20,16 @@ pub(crate) fn import(
             preset.name()
         ));
     }
-    confirm_import(&project.name)?;
-    let home = process::home_dir()?;
-    let claude = env::var_os("SBXR_CLAUDE_AUTH_FILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".claude/.credentials.json"));
+    let claude = host_claude_auth_file()?;
+    if !confirm_import(&project.name)? {
+        return Err("authentication import cancelled".to_owned());
+    }
 
     if preset.has_codex() {
         println!("note: Codex uses Docker host-managed OAuth; its auth.json is never copied");
     }
     if claude.is_file() {
-        import_file(
-            context,
-            &project.name,
-            &claude,
-            "umask 077; mkdir -p \"$HOME/.claude\"; cat > \"$HOME/.claude/.credentials.json\"",
-        )?;
-        println!("==> imported host Claude authentication");
+        import_claude_file(context, &project.name, &claude)?;
     } else {
         return Err(format!(
             "no readable host Claude cache at {}; use native login inside the sandbox",
@@ -47,9 +40,62 @@ pub(crate) fn import(
     Ok(())
 }
 
-fn confirm_import(sandbox_name: &str) -> Result<(), String> {
-    if env::var("SBXR_YES").as_deref() == Ok("1") {
+pub(crate) fn offer_host_import(
+    context: &Context,
+    project: &Project,
+    preset: Preset,
+) -> Result<(), String> {
+    if !preset.has_claude() {
         return Ok(());
+    }
+    let claude = host_claude_auth_file()?;
+    if !claude.is_file() || sandbox_has_claude_auth(context, &project.name)? {
+        return Ok(());
+    }
+    if !io::stdin().is_terminal() && env::var("SBXR_YES").as_deref() != Ok("1") {
+        println!(
+            "note: host Claude login detected; run `sbxr auth-import {}` to import it into this trusted sandbox",
+            project.path.display()
+        );
+        return Ok(());
+    }
+    println!(
+        "Host Claude subscription login detected at {}.",
+        claude.display()
+    );
+    if confirm_import(&project.name)? {
+        import_claude_file(context, &project.name, &claude)?;
+    } else {
+        println!("note: Claude authentication was not imported; use `sbxr auth-import .` later");
+    }
+    Ok(())
+}
+
+fn host_claude_auth_file() -> Result<PathBuf, String> {
+    let home = process::home_dir()?;
+    Ok(env::var_os("SBXR_CLAUDE_AUTH_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".claude/.credentials.json")))
+}
+
+fn sandbox_has_claude_auth(context: &Context, sandbox_name: &str) -> Result<bool, String> {
+    let status = process::sbx_command(context.preserve_xdg_state)
+        .args([
+            "exec",
+            sandbox_name,
+            "--",
+            "test",
+            "-s",
+            "/home/agent/.claude/.credentials.json",
+        ])
+        .status()
+        .map_err(|error| format!("could not inspect sandbox Claude authentication: {error}"))?;
+    Ok(status.success())
+}
+
+fn confirm_import(sandbox_name: &str) -> Result<bool, String> {
+    if env::var("SBXR_YES").as_deref() == Ok("1") {
+        return Ok(true);
     }
     if !io::stdin().is_terminal() {
         return Err("auth import needs an interactive terminal or SBXR_YES=1".to_owned());
@@ -62,11 +108,18 @@ fn confirm_import(sandbox_name: &str) -> Result<(), String> {
     io::stdin()
         .read_line(&mut answer)
         .map_err(|error| error.to_string())?;
-    if matches!(answer.trim(), "y" | "Y" | "yes" | "YES") {
-        Ok(())
-    } else {
-        Err("authentication import cancelled".to_owned())
-    }
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES"))
+}
+
+fn import_claude_file(context: &Context, sandbox_name: &str, source: &Path) -> Result<(), String> {
+    import_file(
+        context,
+        sandbox_name,
+        source,
+        "umask 077; mkdir -p \"$HOME/.claude\"; cat > \"$HOME/.claude/.credentials.json\"",
+    )?;
+    println!("==> imported host Claude authentication");
+    Ok(())
 }
 
 fn import_file(

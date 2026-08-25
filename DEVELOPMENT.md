@@ -75,7 +75,7 @@ The binary is deliberately split by responsibility:
 | `environment.rs` | Project identity, deterministic names, data paths, and RocksDB validation |
 | `sandbox.rs` | Sandbox creation/reuse, review mode, remote commands, and Cargo audits |
 | `host.rs` | Setup, action-specific preflight, and `doctor` diagnostics |
-| `auth.rs` | Explicit credential import and subscription status |
+| `auth.rs` | Credential-import offer, explicit import, and subscription status |
 | `vscode.rs` | Remote-SSH launch and VS Code extension mirroring |
 | `sync.rs` | Safe agent configuration selection, merging, rewriting, and transfer |
 | `embedded.rs` | Compile-time inclusion and materialization of kit specifications |
@@ -245,7 +245,9 @@ other VM-local state are removed.
 
 GUI changes additionally require manual verification of `sbxr new`: VS Code
 must open through Remote-SSH, the workspace path must be correct, Rust Analyzer
-must work, and compatible host extensions should appear remotely.
+must work, and compatible host extensions should appear remotely. Close the
+window with multiple terminal tabs open, run `sbxr new` again, and verify VS
+Code restores the remote window and its persistent terminal state.
 
 ## Before handing off a change
 

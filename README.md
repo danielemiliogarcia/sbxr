@@ -58,7 +58,8 @@ To build `sbxr` or contribute a feature, see the
 The default `rust-multi-agent` preset combines:
 
 - Docker's official `codex` agent with host-managed ChatGPT subscription OAuth;
-- pinned Rust tooling and Cargo security tools;
+- pinned Rust tooling, Cargo security tools, and a colored Git-aware Bash
+  prompt;
 - pinned Claude Code with sandbox-local Claude subscription OAuth;
 - pinned Pi, connected to the Docker-managed Codex OAuth proxy and able to
   detect the sandbox-local Claude login;
@@ -139,14 +140,21 @@ code --install-extension ms-vscode-remote.remote-ssh
 
 Use `sbxr --preset rust-claude setup` when configuring a Claude-only
 installation; it skips OpenAI OAuth. Claude subscription login itself remains
-inside the sandbox, using Claude's native `/login` flow.
+inside the sandbox. When a host Claude login is detected, `sbxr new` and
+`sbxr vscode` offer to import it with an explicit credential warning; otherwise
+use Claude's native `/login` flow inside the sandbox.
 
 The first `sbxr new .` run creates a deterministic project sandbox,
 initializes an empty directory with Cargo, and opens VS Code. Later runs reuse
-that sandbox. Before taking action, every command runs a scoped host preflight
-and reports all of its missing prerequisites together. For example, `new`
-checks `sbx`, VS Code, OpenSSH, the VS Code Remote-SSH extension, and KVM access
-on Linux, while `shell` does not require VS Code. The preflight only gives
+that sandbox and ask VS Code to restore the existing remote project window
+rather than forcing a fresh session. With VS Code's persistent-terminal
+settings enabled (the default), terminal tabs and scrollback reconnect or
+revive when possible. Stopping or removing the underlying process can prevent
+a live process from reconnecting; `sbxr rm` intentionally discards all
+sandbox-local state. Before taking action, every command runs a scoped host
+preflight and reports all of its missing prerequisites together. For example,
+`new` checks `sbx`, VS Code, OpenSSH, the VS Code Remote-SSH extension, and KVM
+access on Linux, while `shell` does not require VS Code. The preflight only gives
 installation guidance; it never installs host software or invokes `sudo`.
 `doctor` remains the complete diagnostic, including Docker sign-in, OAuth,
 policy, and kit validation.
@@ -206,8 +214,11 @@ in [ENVIRONMENT.md](ENVIRONMENT.md).
 ## Subscriptions and customization
 
 Codex uses Docker's official host-managed OAuth path. The real OpenAI token is
-not copied into the VM. `auth-import` copies only Claude's cache, after an
-explicit warning, because same-user project code can read it.
+not copied into the VM. Claude is an additional CLI in the default preset, so
+it cannot use that Codex-specific proxy. When the host Claude cache exists and
+the sandbox has no Claude login, `sbxr new` and `sbxr vscode` offer to import
+it after an explicit warning. `sbxr auth-import .` performs the same operation
+on demand. Same-user project code can read an imported Claude credential.
 
 Pi recognizes Docker's Codex proxy sentinel, so `pi --provider openai-codex`
 uses the same ChatGPT subscription without receiving the real token. When a
@@ -218,7 +229,8 @@ Anthropic “extra usage,” potentially billed per token rather than against th
 normal plan allowance.
 
 The launcher mirrors an allowlist of useful host configuration: instructions,
-skills, hooks, prompts, status-line scripts, themes, and plugin metadata/cache.
+skills, hooks, prompts, status-line scripts (including a script referenced from
+Claude's `statusLine.command`), themes, and plugin metadata/cache.
 It excludes authentication files, histories, sessions, logs, project trust
 records, runtime state, and Codex system-managed skills. Host paths in copied
 text are rewritten to `/home/agent`, while Docker-managed provider and safety
@@ -249,7 +261,8 @@ mirror them from a trusted host profile.
 - `src/sandbox.rs`: development/review sandbox lifecycle, remote commands, and
   Cargo audits;
 - `src/host.rs`: setup, preflight checks, and diagnostics;
-- `src/auth.rs`: explicit credential import and subscription status;
+- `src/auth.rs`: credential-import offer, explicit import, and subscription
+  status;
 - `src/vscode.rs`: Remote-SSH launch and extension mirroring;
 - `src/sync.rs`: pure-Rust allowlist, safe merges, path rewriting, and tar
   streaming;

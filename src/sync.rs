@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 use std::env;
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::UNIX_EPOCH;
 
@@ -23,6 +23,7 @@ const CODEX_PATHS: &[&str] = &[
 const CLAUDE_PATHS: &[&str] = &[
     ".claude/CLAUDE.md",
     ".claude/settings.local.json",
+    ".claude/statusline.sh",
     ".claude/statusline-command.sh",
     ".claude/hooks",
     ".claude/commands",
@@ -69,6 +70,11 @@ pub fn capabilities(
     }
     if claude {
         selected.extend(existing(&home, CLAUDE_PATHS));
+        if let Some(statusline) = claude_statusline_script(&home)? {
+            if !selected.contains(&statusline) {
+                selected.push(statusline);
+            }
+        }
     }
     if pi {
         selected.extend(existing(&home, PI_PATHS));
@@ -152,11 +158,64 @@ fn pi_extensions_compatible(sandbox_name: &str, preserve_xdg_state: bool) -> Res
     Ok(compatible)
 }
 
-fn existing(home: &Path, paths: &'static [&'static str]) -> impl Iterator<Item = &'static str> {
+fn existing(home: &Path, paths: &'static [&'static str]) -> impl Iterator<Item = PathBuf> {
     paths
         .iter()
         .copied()
         .filter(|relative| home.join(relative).exists())
+        .map(PathBuf::from)
+}
+
+fn claude_statusline_script(home: &Path) -> Result<Option<PathBuf>, String> {
+    let settings_path = home.join(".claude/settings.json");
+    if !settings_path.is_file() {
+        return Ok(None);
+    }
+    let settings: Value = serde_json::from_slice(
+        &fs::read(&settings_path)
+            .map_err(|error| format!("could not read {}: {error}", settings_path.display()))?,
+    )
+    .map_err(|error| format!("could not parse {}: {error}", settings_path.display()))?;
+    let Some(command) = settings
+        .get("statusLine")
+        .and_then(|value| value.get("command"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(None);
+    };
+    let home_text = home.to_string_lossy();
+    let Some(relative) = statusline_relative_path(command, &home_text) else {
+        return Ok(None);
+    };
+    Ok(home.join(&relative).is_file().then_some(relative))
+}
+
+fn statusline_relative_path(command: &str, home: &str) -> Option<PathBuf> {
+    let prefixes = [
+        (format!("{home}/.claude/"), ".claude/"),
+        ("$HOME/.claude/".to_owned(), ".claude/"),
+        ("~/.claude/".to_owned(), ".claude/"),
+    ];
+    for (prefix, relative_prefix) in prefixes {
+        let Some(start) = command.find(&prefix) else {
+            continue;
+        };
+        let tail = &command[start + prefix.len()..];
+        let end = tail
+            .find(|character: char| character.is_whitespace() || "'\";&|<>()".contains(character))
+            .unwrap_or(tail.len());
+        if end == 0 {
+            continue;
+        }
+        let relative = PathBuf::from(relative_prefix).join(&tail[..end]);
+        if relative
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+        {
+            return Some(relative);
+        }
+    }
+    None
 }
 
 fn stream_tree(
@@ -164,7 +223,7 @@ fn stream_tree(
     preserve_xdg_state: bool,
     home: &Path,
     home_text: &str,
-    selected: &[&str],
+    selected: &[PathBuf],
 ) -> Result<(), String> {
     let mut child = process::sbx_command(preserve_xdg_state)
         .arg("exec")
@@ -181,7 +240,7 @@ fn stream_tree(
             .ok_or("remote capability extraction stdin was unavailable")?;
         let mut archive = TarWriter::new(output);
         for relative in selected {
-            archive.append(&home.join(relative), Path::new(relative), home_text)?;
+            archive.append(&home.join(relative), relative, home_text)?;
         }
         archive.finish()?;
     }
@@ -573,5 +632,21 @@ mod tests {
         let (prefix, name) = split_ustar_name(&path).unwrap();
         assert!(prefix.len() <= 155);
         assert!(name.len() <= 100);
+    }
+
+    #[test]
+    fn finds_allowlisted_claude_statusline_commands() {
+        assert_eq!(
+            statusline_relative_path("bash '/home/dev/.claude/status/token-line.sh'", "/home/dev"),
+            Some(PathBuf::from(".claude/status/token-line.sh"))
+        );
+        assert_eq!(
+            statusline_relative_path("$HOME/.claude/statusline.sh", "/home/dev"),
+            Some(PathBuf::from(".claude/statusline.sh"))
+        );
+        assert_eq!(
+            statusline_relative_path("bash /tmp/untrusted.sh", "/home/dev"),
+            None
+        );
     }
 }

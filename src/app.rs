@@ -42,6 +42,7 @@ pub(crate) fn run() -> Result<i32, String> {
         Action::New(_) | Action::Code(_) => {
             vscode::check_host()?;
             sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref())?;
+            auth::offer_host_import(&context, &project, preset)?;
             vscode::open(&context, &project.name, &project.path, true)?;
         }
         Action::Up(_) => {

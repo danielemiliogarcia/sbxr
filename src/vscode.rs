@@ -1,6 +1,7 @@
 use crate::environment::Context;
 use crate::process;
 use std::env;
+use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
@@ -37,15 +38,19 @@ pub(crate) fn open(
     } else {
         println!("note: host VS Code extensions are not mirrored in review mode");
     }
-    let remote = format!("ssh-remote+{sandbox_name}.sbx");
     process::run_checked(
         process::code_command(context.preserve_xdg_state)
-            .arg("--new-window")
-            .arg("--remote")
-            .arg(remote)
-            .arg(project),
+            .args(remote_open_arguments(sandbox_name, project)),
         "opening VS Code",
     )
+}
+
+fn remote_open_arguments(sandbox_name: &str, project: &Path) -> Vec<OsString> {
+    vec![
+        "--remote".into(),
+        format!("ssh-remote+{sandbox_name}.sbx").into(),
+        project.as_os_str().to_owned(),
+    ]
 }
 
 fn sync_extensions(context: &Context, sandbox_name: &str) -> Result<(), String> {
@@ -111,5 +116,19 @@ mod tests {
             mirrored_extension_specs(listing),
             vec!["rust-lang.rust-analyzer@1.2.3"]
         );
+    }
+
+    #[test]
+    fn opens_remote_folder_without_forcing_a_fresh_window() {
+        let arguments = remote_open_arguments("rust-project", Path::new("/work/project"));
+        assert_eq!(
+            arguments,
+            vec![
+                OsString::from("--remote"),
+                OsString::from("ssh-remote+rust-project.sbx"),
+                OsString::from("/work/project")
+            ]
+        );
+        assert!(!arguments.iter().any(|argument| argument == "--new-window"));
     }
 }
