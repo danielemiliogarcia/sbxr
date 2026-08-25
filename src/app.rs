@@ -40,21 +40,21 @@ pub(crate) fn run() -> Result<i32, String> {
 
     match action {
         Action::New(_) | Action::Code(_) => {
-            vscode::check_host()?;
-            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref())?;
-            auth::offer_host_import(&context, &project, preset)?;
-            vscode::open(&context, &project.name, &project.path, true)?;
+            open_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
+        }
+        Action::Update(_) => {
+            open_dev(&context, &project, preset, rocksdb.as_ref(), true)?;
         }
         Action::Up(_) => {
-            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref())?;
+            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
             println!("ready: ssh {}.sbx", project.name);
         }
         Action::Shell(_) => {
-            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref())?;
+            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
             sandbox::run_remote(&project, &["bash", "-l"])?;
         }
         Action::Codex(_) => {
-            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref())?;
+            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
             if !preset.has_codex() {
                 return Err(format!(
                     "Codex is not installed by the {} preset",
@@ -64,7 +64,7 @@ pub(crate) fn run() -> Result<i32, String> {
             sandbox::run_remote(&project, &["codex"])?;
         }
         Action::Claude(_) => {
-            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref())?;
+            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
             if !preset.has_claude() {
                 return Err(format!(
                     "Claude is not installed by the {} preset",
@@ -74,7 +74,7 @@ pub(crate) fn run() -> Result<i32, String> {
             sandbox::run_remote(&project, &["claude"])?;
         }
         Action::Pi(_) => {
-            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref())?;
+            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
             if preset != cli::Preset::MultiAgent {
                 return Err(format!(
                     "Pi is not installed by the {} preset",
@@ -87,14 +87,14 @@ pub(crate) fn run() -> Result<i32, String> {
             auth::import(&context, &project, preset, rocksdb.as_ref())?;
         }
         Action::AuthStatus(_) => {
-            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref())?;
+            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
             auth::show_status(&context, &project.name, preset);
         }
         Action::Audit(_) => sandbox::audit(&context, &project, preset, rocksdb.as_ref())?,
         Action::Review(_) => {
             vscode::check_host()?;
             sandbox::ensure_review(&context, &project, rocksdb.as_ref())?;
-            vscode::open(&context, &project.review_name, &project.path, false)?;
+            vscode::open(&context, &project.review_name, &project.path, false, true)?;
         }
         Action::Name(_) => println!("{}", project.name),
         Action::Status(_) => {
@@ -131,4 +131,27 @@ pub(crate) fn run() -> Result<i32, String> {
         Action::Setup | Action::Doctor | Action::Help => unreachable!(),
     }
     Ok(0)
+}
+
+fn open_dev(
+    context: &Context,
+    project: &Project,
+    preset: cli::Preset,
+    rocksdb: Option<&RocksDbHost>,
+    force_sync: bool,
+) -> Result<(), String> {
+    vscode::check_host()?;
+    if force_sync {
+        println!("==> forcing host integration update for {}", project.name);
+    }
+    let mut state = sandbox::ensure_dev(context, project, preset, rocksdb, force_sync)?;
+    if force_sync || !state.vscode {
+        auth::offer_host_import(context, project, preset)?;
+    }
+    if vscode::open(context, &project.name, &project.path, true, !state.vscode)? {
+        state.vscode = true;
+        crate::sync::write_bootstrap_state(&project.name, context.preserve_xdg_state, state)?;
+        println!("==> sandbox host-integration bootstrap complete");
+    }
+    Ok(())
 }

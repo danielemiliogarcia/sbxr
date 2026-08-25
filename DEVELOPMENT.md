@@ -77,7 +77,7 @@ The binary is deliberately split by responsibility:
 | `host.rs` | Setup, action-specific preflight, and `doctor` diagnostics |
 | `auth.rs` | Credential-import offer, explicit import, and subscription status |
 | `vscode.rs` | Remote-SSH launch and VS Code extension mirroring |
-| `sync.rs` | Safe agent configuration selection, merging, rewriting, and transfer |
+| `sync.rs` | Agent configuration selection/transfer and persistent bootstrap state |
 | `embedded.rs` | Compile-time inclusion and materialization of kit specifications |
 | `process.rs` | External-command execution and installation guidance |
 | `sha256.rs` | Dependency-free deterministic project-name hashing |
@@ -251,6 +251,13 @@ the SSH window's installed extensions. Do not use `code --remote NAME
 --list-extensions` as remote verification: VS Code's desktop extension CLI can
 report the local inventory for that form. The development window must not show
 a Workspace Trust prompt, while `sbxr review` must retain Workspace Trust.
+For bootstrap changes, exercise three distinct runs: the first `sbxr new` must
+mirror agent integrations, wait for the VS Code Server, install/verify remote
+extensions, and write `/home/agent/.local/state/sbxr/bootstrap-v1.json`; the
+second `sbxr new` must open VS Code without any of that bootstrap output; and
+`sbxr update` must force both agent and VS Code work again and restore both
+completion flags. Repeat the fast-path check once with a stopped sandbox so the
+marker lookup also proves that it starts the sandbox correctly.
 Close the window with multiple terminal tabs open, run `sbxr new` again, and
 verify VS Code restores the remote window and its persistent terminal state.
 Then run `sbxr stop` while the remote window is open: only that window should

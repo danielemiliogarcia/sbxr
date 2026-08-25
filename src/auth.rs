@@ -13,7 +13,7 @@ pub(crate) fn import(
     preset: Preset,
     rocksdb: Option<&RocksDbHost>,
 ) -> Result<(), String> {
-    sandbox::ensure_dev(context, project, preset, rocksdb)?;
+    sandbox::ensure_dev(context, project, preset, rocksdb, false)?;
     if !preset.has_claude() {
         return Err(format!(
             "the {} preset has no sandbox-local subscription cache to import",

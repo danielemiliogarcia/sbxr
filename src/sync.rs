@@ -54,6 +54,67 @@ const PI_PATHS: &[&str] = &[
 const PI_EXTENSION_PATHS: &[&str] = &[".pi/agent/extensions"];
 const REMOTE_RTK: &str = "/usr/local/bin/rtk";
 const PI_NPM_LOCK_MARKER: &str = "/home/agent/.pi/agent/npm/.sbxr-lock-sha256";
+const BOOTSTRAP_STATE_PATH: &str = "/home/agent/.local/state/sbxr/bootstrap-v1.json";
+const BOOTSTRAP_STATE_DIRECTORY: &str = "/home/agent/.local/state/sbxr";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct BootstrapState {
+    pub(crate) agent: bool,
+    pub(crate) vscode: bool,
+}
+
+pub(crate) fn bootstrap_state(
+    sandbox_name: &str,
+    preserve_xdg_state: bool,
+) -> Result<BootstrapState, String> {
+    let Some(bytes) = remote_file(sandbox_name, preserve_xdg_state, BOOTSTRAP_STATE_PATH)? else {
+        return Ok(BootstrapState::default());
+    };
+    Ok(parse_bootstrap_state(&bytes))
+}
+
+fn parse_bootstrap_state(bytes: &[u8]) -> BootstrapState {
+    let value: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
+    BootstrapState {
+        agent: value.get("agent").and_then(Value::as_bool).unwrap_or(false),
+        vscode: value
+            .get("vscode")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }
+}
+
+pub(crate) fn write_bootstrap_state(
+    sandbox_name: &str,
+    preserve_xdg_state: bool,
+    state: BootstrapState,
+) -> Result<(), String> {
+    process::run_checked(
+        process::sbx_command(preserve_xdg_state).args([
+            "exec",
+            sandbox_name,
+            "mkdir",
+            "-p",
+            BOOTSTRAP_STATE_DIRECTORY,
+        ]),
+        "creating sandbox bootstrap-state directory",
+    )?;
+    let bytes = serialize_bootstrap_state(state)?;
+    upload_file(
+        sandbox_name,
+        preserve_xdg_state,
+        BOOTSTRAP_STATE_PATH,
+        &bytes,
+    )
+}
+
+fn serialize_bootstrap_state(state: BootstrapState) -> Result<Vec<u8>, String> {
+    serde_json::to_vec_pretty(&serde_json::json!({
+        "agent": state.agent,
+        "vscode": state.vscode,
+    }))
+    .map_err(|error| format!("could not serialize sandbox bootstrap state: {error}"))
+}
 
 pub fn capabilities(
     sandbox_name: &str,
@@ -884,6 +945,27 @@ fn mode(metadata: &fs::Metadata) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn round_trips_versioned_bootstrap_state() {
+        let state = BootstrapState {
+            agent: true,
+            vscode: false,
+        };
+        let bytes = serialize_bootstrap_state(state).unwrap();
+        assert_eq!(parse_bootstrap_state(&bytes), state);
+        assert_eq!(
+            parse_bootstrap_state(br#"{"agent":true}"#),
+            BootstrapState {
+                agent: true,
+                vscode: false,
+            }
+        );
+        assert_eq!(
+            parse_bootstrap_state(b"not json"),
+            BootstrapState::default()
+        );
+    }
 
     #[test]
     fn preserves_docker_codex_sections_and_host_preferences() {

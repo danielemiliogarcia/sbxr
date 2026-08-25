@@ -116,6 +116,7 @@ impl Cli {
 pub(crate) enum Action {
     New(Option<PathBuf>),
     Code(Option<PathBuf>),
+    Update(Option<PathBuf>),
     Up(Option<PathBuf>),
     Shell(Option<PathBuf>),
     Codex(Option<PathBuf>),
@@ -163,6 +164,7 @@ impl Action {
         Ok(match command.as_ref() {
             "new" => Self::New(path),
             "code" | "vscode" => Self::Code(path),
+            "update" => Self::Update(path),
             "up" => Self::Up(path),
             "shell" => Self::Shell(path),
             "codex" => Self::Codex(path),
@@ -204,6 +206,7 @@ impl Action {
         match self {
             Self::New(path)
             | Self::Code(path)
+            | Self::Update(path)
             | Self::Up(path)
             | Self::Shell(path)
             | Self::Codex(path)
@@ -223,7 +226,7 @@ impl Action {
 
     pub(crate) fn required_host_commands(&self) -> &'static [&'static str] {
         match self {
-            Self::New(_) | Self::Code(_) => &["sbx", "code", "ssh"],
+            Self::New(_) | Self::Code(_) | Self::Update(_) => &["sbx", "code", "ssh"],
             Self::Review(_) => &["sbx", "code", "ssh", "git"],
             Self::Up(_)
             | Self::Shell(_)
@@ -241,7 +244,10 @@ impl Action {
     }
 
     pub(crate) fn needs_vscode_remote_ssh(&self) -> bool {
-        matches!(self, Self::New(_) | Self::Code(_) | Self::Review(_))
+        matches!(
+            self,
+            Self::New(_) | Self::Code(_) | Self::Update(_) | Self::Review(_)
+        )
     }
 
     pub(crate) fn needs_kvm(&self) -> bool {
@@ -249,6 +255,7 @@ impl Action {
             self,
             Self::New(_)
                 | Self::Code(_)
+                | Self::Update(_)
                 | Self::Up(_)
                 | Self::Shell(_)
                 | Self::Codex(_)
@@ -271,6 +278,7 @@ Usage:
   sbxr [new] [PATH]        Create/reuse the sandbox and open VS Code
   sbxr vscode [PATH]       Explicit alias for `sbxr new`
   sbxr code [PATH]         Legacy alias for `sbxr new`
+  sbxr update [PATH]       Re-mirror host integrations and open VS Code
   sbxr up [PATH]           Create/reuse without attaching
   sbxr shell [PATH]        Open a login shell in the sandbox
   sbxr codex [PATH]        Run Codex with a ChatGPT subscription
@@ -314,6 +322,10 @@ mod tests {
             Action::Code(Some(_))
         ));
         assert!(matches!(
+            Action::parse(vec!["update".into(), "/tmp/project".into()]).unwrap(),
+            Action::Update(Some(_))
+        ));
+        assert!(matches!(
             Action::parse(vec!["status".into()]).unwrap(),
             Action::Status(None)
         ));
@@ -348,6 +360,11 @@ mod tests {
         let new = Action::New(None);
         assert_eq!(new.required_host_commands(), ["sbx", "code", "ssh"]);
         assert!(new.needs_vscode_remote_ssh());
+
+        let update = Action::Update(None);
+        assert_eq!(update.required_host_commands(), ["sbx", "code", "ssh"]);
+        assert!(update.needs_vscode_remote_ssh());
+        assert!(update.needs_kvm());
 
         let review = Action::Review(None);
         assert_eq!(

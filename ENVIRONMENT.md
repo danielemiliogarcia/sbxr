@@ -86,16 +86,21 @@ commands for that sandbox.
 
 ## Mirroring controls
 
+Mirroring runs during the sandbox's first bootstrap and is then skipped on
+ordinary `sbxr new`/`up`/agent commands. Use `sbxr update .` to deliberately
+apply current host configuration and extension inventory to an existing
+sandbox. The variables below affect that initial bootstrap or explicit update.
+
 Disable all host agent capability/configuration mirroring:
 
 ```bash
-SBXR_SYNC_AGENT_CONFIG=0 sbxr new .
+SBXR_SYNC_AGENT_CONFIG=0 sbxr update .
 ```
 
 Disable host VS Code extension mirroring:
 
 ```bash
-SBXR_SYNC_VSCODE_EXTENSIONS=0 sbxr new .
+SBXR_SYNC_VSCODE_EXTENSIONS=0 sbxr update .
 ```
 
 Pi prompts, themes, skills, settings, and raw source extensions are normally
@@ -105,8 +110,8 @@ installed for the sandbox instead of copying platform-specific `node_modules`.
 Disable copying raw source extensions when the host profile is not trusted:
 
 ```bash
-SBXR_SYNC_PI_EXTENSIONS=0 sbxr new .  # omit raw source extensions
-SBXR_SYNC_PI_EXTENSIONS=1 sbxr new .  # explicitly enable them (the default)
+SBXR_SYNC_PI_EXTENSIONS=0 sbxr update .  # omit raw source extensions
+SBXR_SYNC_PI_EXTENSIONS=1 sbxr update .  # explicitly enable them (the default)
 ```
 
 The setting does not remove Pi package declarations from a mirrored

@@ -70,7 +70,8 @@ pub(crate) fn ensure_dev(
     project: &Project,
     preset: Preset,
     rocksdb: Option<&RocksDbHost>,
-) -> Result<(), String> {
+    force_sync: bool,
+) -> Result<sync::BootstrapState, String> {
     process::require("sbx")?;
     validate_kits(context)?;
     if sandbox_exists(context, &project.name)? {
@@ -102,7 +103,17 @@ pub(crate) fn ensure_dev(
         process::run_checked(&mut command, "creating development sandbox")?;
     }
     maybe_initialize_empty_project(context, project)?;
-    sync_agent_capabilities(context, project, preset)
+    let mut state = sync::bootstrap_state(&project.name, context.preserve_xdg_state)?;
+    if force_sync {
+        state = sync::BootstrapState::default();
+        sync::write_bootstrap_state(&project.name, context.preserve_xdg_state, state)?;
+    }
+    if !state.agent {
+        sync_agent_capabilities(context, project, preset)?;
+        state.agent = true;
+        sync::write_bootstrap_state(&project.name, context.preserve_xdg_state, state)?;
+    }
+    Ok(state)
 }
 
 fn append_rocksdb_create_options(
@@ -247,7 +258,7 @@ pub(crate) fn audit(
     preset: Preset,
     rocksdb: Option<&RocksDbHost>,
 ) -> Result<(), String> {
-    ensure_dev(context, project, preset, rocksdb)?;
+    ensure_dev(context, project, preset, rocksdb, false)?;
     let script = r#"
 set -euo pipefail
 cd -- "$1"

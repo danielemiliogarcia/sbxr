@@ -36,12 +36,14 @@ pub(crate) fn open(
     sandbox_name: &str,
     project: &Path,
     mirror_extensions: bool,
-) -> Result<(), String> {
-    check_host()?;
-    process::run_checked(
-        process::sbx_command(context.preserve_xdg_state).args(["setup", "ssh"]),
-        "configuring Docker Sandbox SSH",
-    )?;
+    bootstrap: bool,
+) -> Result<bool, String> {
+    if bootstrap {
+        process::run_checked(
+            process::sbx_command(context.preserve_xdg_state).args(["setup", "ssh"]),
+            "configuring Docker Sandbox SSH",
+        )?;
+    }
     process::run_checked(
         process::code_command(context.preserve_xdg_state).args(remote_open_arguments(
             sandbox_name,
@@ -50,13 +52,16 @@ pub(crate) fn open(
         )),
         "opening VS Code",
     )?;
+    if !bootstrap {
+        return Ok(false);
+    }
     println!("==> waiting for the VS Code Server on {sandbox_name}.sbx");
     let Some(server_cli) = wait_for_remote_server(context, sandbox_name)? else {
         eprintln!(
             "warning: VS Code Server was not ready after {} seconds; rerun `sbxr vscode` to finish remote setup",
             REMOTE_SERVER_WAIT.as_secs()
         );
-        return Ok(());
+        return Ok(false);
     };
     configure_terminal_persistence(context, sandbox_name)?;
     if mirror_extensions {
@@ -64,7 +69,7 @@ pub(crate) fn open(
     } else {
         println!("note: host VS Code extensions are not mirrored in review mode");
     }
-    Ok(())
+    Ok(true)
 }
 
 pub(crate) fn close_for_stop(

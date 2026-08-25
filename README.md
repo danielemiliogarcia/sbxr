@@ -79,6 +79,7 @@ inside the sandbox.
 |---|---|
 | `sbxr new .` | Create/reuse and open VS Code |
 | `sbxr vscode .` | Explicit alias for `sbxr new .` |
+| `sbxr update .` | Force host agent/VS Code mirroring, then open VS Code |
 | `sbxr up .` | Create/reuse without attaching |
 | `sbxr shell .` | Open a project shell |
 | `sbxr codex .` | Run Codex |
@@ -293,24 +294,32 @@ code --install-extension ms-vscode-remote.remote-ssh
 
 Use `sbxr --preset rust-claude setup` when configuring a Claude-only
 installation; it skips OpenAI OAuth. Claude subscription login itself remains
-inside the sandbox. When a host Claude login is detected, `sbxr new` and
-`sbxr vscode` offer to import it with an explicit credential warning; otherwise
-use Claude's native `/login` flow inside the sandbox.
+inside the sandbox. When a host Claude login is detected, the initial `sbxr
+new`/`sbxr vscode` bootstrap and explicit `sbxr update` offer to import it with
+an explicit credential warning; otherwise use Claude's native `/login` flow
+inside the sandbox.
 
 The first `sbxr new .` run creates a deterministic project sandbox,
-initializes an empty directory with Cargo, and opens VS Code. Later runs reuse
-that sandbox and ask VS Code to restore the existing remote project window
-rather than forcing a fresh session. With VS Code's persistent-terminal
-settings enabled (the default), terminal tabs and scrollback reconnect or
-revive when possible. Stopping or removing the underlying process can prevent
-a live process from reconnecting; `sbxr rm` intentionally discards all
-sandbox-local state. Before taking action, every command runs a scoped host
-preflight and reports all of its missing prerequisites together. For example,
-`new` checks `sbx`, VS Code, OpenSSH, the VS Code Remote-SSH extension, and KVM
-access on Linux, while `shell` does not require VS Code. The preflight only gives
-installation guidance; it never installs host software or invokes `sudo`.
-`doctor` remains the complete diagnostic, including Docker sign-in, OAuth,
-policy, and kit validation.
+initializes an empty directory with Cargo, mirrors trusted host agent and VS
+Code integrations, records that bootstrap inside the persistent sandbox, and
+opens VS Code. Later `new` runs skip SSH setup, agent copying, the VS Code
+Server wait, and extension inventory/install work; they reuse the sandbox and
+open its existing remote project window immediately. Run `sbxr update .` when
+host agent plugins, settings, hooks, or VS Code extensions change and should be
+re-mirrored deliberately. An older sandbox without the marker performs one
+bootstrap after upgrading `sbxr`.
+
+With VS Code's persistent-terminal settings enabled (the default), terminal
+tabs and scrollback reconnect or revive when possible. Stopping or removing the
+underlying process can prevent a live process from reconnecting; `sbxr rm`
+intentionally discards all sandbox-local state. Before taking action, every
+command runs a scoped host preflight and reports all of its missing
+prerequisites together. For example, `new` and `update` check `sbx`, VS Code,
+OpenSSH, the VS Code Remote-SSH extension, and KVM access on Linux, while
+`shell` does not require VS Code. The preflight only gives installation
+guidance; it never installs host software or invokes `sudo`. `doctor` remains
+the complete diagnostic, including Docker sign-in, OAuth, policy, and kit
+validation.
 
 Normal `sbxr new` and `sbxr vscode` windows disable VS Code Workspace Trust for
 that launched session. The sandbox is already the execution boundary and the
@@ -347,9 +356,10 @@ accidentally reusing a VM with a different agent composition.
 Codex uses Docker's official host-managed OAuth path. The real OpenAI token is
 not copied into the VM. Claude is an additional CLI in the default preset, so
 it cannot use that Codex-specific proxy. When the host Claude cache exists and
-the sandbox has no Claude login, `sbxr new` and `sbxr vscode` offer to import
-it after an explicit warning. `sbxr auth-import .` performs the same operation
-on demand. Same-user project code can read an imported Claude credential.
+the sandbox has no Claude login, the initial editor bootstrap and `sbxr update`
+offer to import it after an explicit warning. `sbxr auth-import .` performs the
+same operation on demand. Same-user project code can read an imported Claude
+credential.
 
 Pi recognizes Docker's Codex proxy sentinel, so `pi --provider openai-codex`
 uses the same ChatGPT subscription without receiving the real token. When a
@@ -379,11 +389,12 @@ failing on every event. Hooks backed by available commands and mirrored scripts
 continue to work normally; `sbxr` does not install arbitrary hook dependencies.
 
 VS Code extensions are read from `code --list-extensions --show-versions`.
-After the project window starts the matching VS Code Server, they are compared
-and installed through that server's remote extension CLI at matching versions.
-Missing extensions are verified remotely and retried
+During the initial sandbox bootstrap—or an explicit `sbxr update`—the matching
+VS Code Server compares them and installs matching versions through its remote
+extension CLI. Missing extensions are verified remotely and retried
 individually, so one incompatible extension does not hide the others or require
-clicking “Install in SSH.” Host-only Remote extensions are excluded and any
+clicking “Install in SSH.” Normal later `sbxr new` runs skip the inventory
+entirely for faster startup. Host-only Remote extensions are excluded and any
 remaining incompatible extensions are named in a warning. Review mode does not
 mirror the host extension set.
 
@@ -418,8 +429,8 @@ mirror them from a trusted host profile.
 - `src/auth.rs`: credential-import offer, explicit import, and subscription
   status;
 - `src/vscode.rs`: Remote-SSH launch and extension mirroring;
-- `src/sync.rs`: pure-Rust allowlist, safe merges, path rewriting, and tar
-  streaming;
+- `src/sync.rs`: pure-Rust capability selection, merges, path rewriting, tar
+  streaming, and persistent bootstrap markers;
 - `src/embedded.rs`: compile-time kit embedding and materialization;
 - `src/process.rs`: child-process handling and prerequisite guidance;
 - `kits/`: exact declarative environments, including the optional

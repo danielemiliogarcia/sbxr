@@ -155,7 +155,8 @@ Before marking another host as tested, verify:
 1. `cargo build --frozen` and `cargo test --frozen` pass.
 2. `cargo install --locked --force --path .` installs a working native binary.
 3. `sbxr setup` and `sbxr doctor` correctly diagnose the host.
-4. `sbxr new .`, `status`, `stop`, and reconnecting to the same sandbox work.
+4. `sbxr new .`, its marked fast-reopen path, `sbxr update .`, `status`,
+   `stop`, and reconnecting to the same sandbox work.
 5. Native VS Code connects through Remote-SSH, mirrors compatible extensions,
    preserves remote window state, and opens the intended project directory.
 6. Codex, Claude, and Pi subscription authentication works as documented.
