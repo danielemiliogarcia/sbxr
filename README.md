@@ -70,6 +70,131 @@ no host shell helper and embeds all kit specifications in the executable. The
 declarative kits still contain normal Linux provisioning commands executed
 inside the sandbox.
 
+## Commands
+
+| Command | Purpose |
+|---|---|
+| `sbxr new .` | Create/reuse and open VS Code |
+| `sbxr vscode .` | Explicit alias for `sbxr new .` |
+| `sbxr up .` | Create/reuse without attaching |
+| `sbxr shell .` | Open a project shell |
+| `sbxr codex .` | Run Codex |
+| `sbxr claude .` | Run Claude Code |
+| `sbxr pi .` | Run Pi in the multi-agent preset |
+| `sbxr auth-import .` | Explicitly import a trusted host Claude cache |
+| `sbxr auth-status .` | Check Codex, Claude, and Pi provider status |
+| `sbxr audit .` | Run cargo-audit, cargo-deny, and cargo-vet if configured |
+| `sbxr review .` | No-OAuth, clone-mode review sandbox |
+| `sbxr name .` | Print the deterministic name |
+| `sbxr status .` | Report whether the project sandbox exists and its state |
+| `sbxr stop .` | Stop while preserving state |
+| `sbxr rm .` | Remove sandbox-local state; host files remain |
+| `sbxr rm --force .` | Remove even while VS Code/SSH is connected |
+| `sbxr setup` | Configure missing Docker login, OpenAI OAuth, and Remote-SSH |
+| `sbxr doctor` | Run the complete read-only host diagnostic |
+
+`sbxr status` defaults to the current directory and never creates or starts a
+sandbox. It prints the deterministic name, resolved project path, and
+`running`, `stopped`, or `not found`. Its exit status is `0` when the sandbox
+exists and `1` when it does not, making it suitable for scripts. Like sandbox
+names, the result is preset- and optional-RocksDB-specific.
+
+No custom environment variables are required. Optional preset, naming,
+storage, mirroring, RocksDB, and authentication-import overrides are documented
+in [ENVIRONMENT.md](ENVIRONMENT.md).
+
+## Why `sbxr`? From project folder to agent-ready Rust IDE
+
+Docker Sandboxes provides the secure microVM and the flexible `sbx` building
+blocks. `sbxr` adds an opinionated Rust-development workflow on top: stand in a
+project directory, run `sbxr new`, and get a sandbox that is already prepared
+for coding with native VS Code and multiple subscription-backed agents. The
+design goal is to give the developer the familiar experience of coding on the
+local host while moving tool execution and agent risk behind the sandbox
+boundary.
+
+The VS Code window and user interface remain native on the host. Through
+Remote-SSH, terminals, Rust Analyzer, debuggers, agents, and workspace
+extensions execute beside the project inside the sandbox. The SSH connection
+targets a microVM on the same physical machine rather than a server across a
+wide-area network, so editor/control traffic has very low latency and expensive
+analysis stays close to the source files. This makes the experience feel close
+to local development, although VM startup and mounted-filesystem operations can
+still add some overhead compared with running everything directly on the host.
+
+That ready-to-code experience includes:
+
+- one project-scoped, deterministic sandbox that is created once and reused;
+- a default stack containing Docker's official Codex environment, Rust,
+  Claude Code, Pi, and native VS Code Remote-SSH support;
+- ChatGPT and Claude subscription OAuth workflows without requiring API keys;
+- a pinned Rust toolchain plus `rustfmt`, Clippy, Rust Analyzer, LLDB, and Cargo
+  supply-chain tools such as `cargo-audit`, `cargo-deny`, and `cargo-vet`;
+- a local-like Rust editing experience in VS Code: remote Rust Analyzer powers
+  completion, diagnostics, hover information, find references, go to
+  definition, and source navigation across the project and available imported
+  crate sources;
+- an immediately familiar colored Bash prompt with the current Git branch;
+- allowlisted Codex, Claude, and Pi instructions, skills, hooks, prompts,
+  themes, plugins, and status-line customizations mirrored from the host;
+- compatible host VS Code extensions installed at matching versions in the
+  remote extension host, with server-side verification and retries;
+- the normal development folder opened without a redundant Workspace Trust
+  prompt, while the unfamiliar-code `review` workflow keeps that protection;
+- reuse of the same named VS Code remote, allowing VS Code to restore its
+  window, terminal tabs, scrollback, and persistent remote workspace state when
+  possible;
+- automatic Cargo initialization for an empty project directory;
+- setup, diagnostics, authentication status, auditing, shell/agent launchers,
+  and safe sandbox lifecycle commands in one native Rust executable;
+- optional, explicitly enabled host RocksDB reuse for compatible Linux setups.
+
+Nearly the same environment can be assembled manually with `sbx`; `sbxr` does
+not replace or bypass Docker Sandboxes. Doing it by hand means maintaining and
+stacking the kits, choosing stable project names, configuring SSH, opening the
+right remote folder, waiting for the matching VS Code Server, installing and
+verifying remote extensions, arranging each agent's authentication and safe
+customization, recreating the shell experience, preserving the reusable VS
+Code remote identity, and remembering the correct lifecycle commands. `sbxr`
+packages that repeatable integration work so every new project does not require
+the same manual setup.
+
+## Why a microVM instead of a container?
+
+The reason is the security boundary. A normal container isolates processes
+with namespaces and other kernel features, but still shares the host's kernel.
+Docker Sandboxes gives each sandbox a lightweight VM with its own Linux kernel,
+separated from the host by a hypervisor. Escaping either design is never
+impossible, but compromising a container isolation mechanism can expose the
+shared host kernel; escaping a microVM must also cross the separate guest-kernel
+and hypervisor boundary. That is a stronger fit for autonomous agents that run
+untrusted build scripts, install packages, use `sudo`, and execute generated
+code. Docker describes the layers in its
+[sandbox isolation model](https://docs.docker.com/ai/sandboxes/security/isolation/).
+
+The stronger boundary does not make development feel like manually operating
+a traditional VM. `sbx` manages the microVM lifecycle, its private filesystem,
+network, and isolated Docker Engine. The developer does not create a VM image,
+configure SSH ports, expose the host Docker socket, or maintain a privileged
+container solely to give an agent Docker access.
+
+In the default direct mode, Docker Sandboxes mounts the selected project into
+the microVM through filesystem passthrough at the same absolute path it has on
+the host. Both sides see the same working tree, and writes appear immediately
+without a copy or synchronization step. `sbxr new .` supplies that workspace to
+`sbx`, so the developer does not have to construct `-v` mappings, translate
+paths, or arrange container UID/GID ownership merely to edit the project from
+both sides. This managed sharing avoids much of the bind-mount and permission
+plumbing commonly encountered in hand-built development containers. See
+Docker's [workspace-mounting architecture](https://docs.docker.com/ai/sandboxes/architecture/#workspace-mounting).
+
+This convenience has an intentional boundary: the selected project is
+read-write, so an agent can modify or delete anything inside it. The rest of
+the host filesystem, host processes, host kernel, and host Docker daemon remain
+outside the sandbox boundary. For unfamiliar code, `sbxr review` uses Docker's
+clone mode so the host repository is mounted read-only and changes remain in a
+private in-VM clone until the developer explicitly retrieves them.
+
 ## Installation and bootstrap security
 
 Convenient installation or upgrade from the latest public `master` branch:
@@ -169,6 +294,13 @@ installation guidance; it never installs host software or invokes `sudo`.
 `doctor` remains the complete diagnostic, including Docker sign-in, OAuth,
 policy, and kit validation.
 
+Normal `sbxr new` and `sbxr vscode` windows disable VS Code Workspace Trust for
+that launched session. The sandbox is already the execution boundary and the
+development agents intentionally have full permissions inside it, so the
+additional “Trust this folder” prompt would only block expected tooling.
+`sbxr review` does not disable Workspace Trust because it is intended for
+opening unfamiliar code with additional safeguards.
+
 ## Optional host RocksDB acceleration
 
 This is disabled by default. On a Linux host with a compatible installation at
@@ -180,11 +312,7 @@ sbxr --rocksdb-host new .
 
 Use `--rocksdb-host=/another/prefix` for a custom location. The prefix is
 validated and mounted read-only, sandbox-native compression libraries are
-installed, and the sandbox gets a distinct `rdb` name. Repeat the option on
-later `shell`, `audit`, `stop`, or `rm` commands. See the full comparison and
-all three option quickstarts in
-[`../explain.md`](../explain.md#rocksdb-reuse-options-and-quickstarts).
-
+installed, and the sandbox gets a distinct `rdb` name.
 ## Presets
 
 | Preset | Primary official agent | Extra agents |
@@ -195,31 +323,6 @@ all three option quickstarts in
 
 Select one with `--preset rust-codex`. Preset-specific sandbox names prevent
 accidentally reusing a VM with a different agent composition.
-
-## Commands
-
-| Command | Purpose |
-|---|---|
-| `sbxr new .` | Create/reuse and open VS Code |
-| `sbxr vscode .` | Explicit alias for `sbxr new .` |
-| `sbxr up .` | Create/reuse without attaching |
-| `sbxr shell .` | Open a project shell |
-| `sbxr codex .` | Run Codex |
-| `sbxr claude .` | Run Claude Code |
-| `sbxr pi .` | Run Pi in the multi-agent preset |
-| `sbxr auth-import .` | Explicitly import a trusted host Claude cache |
-| `sbxr auth-status .` | Check Codex, Claude, and Pi provider status |
-| `sbxr audit .` | Run cargo-audit, cargo-deny, and cargo-vet if configured |
-| `sbxr review .` | No-OAuth, clone-mode review sandbox |
-| `sbxr name .` | Print the deterministic name |
-| `sbxr stop .` | Stop while preserving state |
-| `sbxr rm .` | Remove sandbox-local state; host files remain |
-| `sbxr setup` | Configure missing Docker login, OpenAI OAuth, and Remote-SSH |
-| `sbxr doctor` | Run the complete read-only host diagnostic |
-
-No custom environment variables are required. Optional preset, naming,
-storage, mirroring, RocksDB, and authentication-import overrides are documented
-in [ENVIRONMENT.md](ENVIRONMENT.md).
 
 ## Subscriptions and customization
 
@@ -246,10 +349,19 @@ records, runtime state, and Codex system-managed skills. Host paths in copied
 text are rewritten to `/home/agent`, while Docker-managed provider and safety
 settings win during merges.
 
-VS Code extensions are read from `code --list-extensions --show-versions` and
-installed remotely at matching versions. Host-only Remote extensions are
-excluded and incompatible extensions produce a warning. Review mode does not
+VS Code extensions are read from `code --list-extensions --show-versions`.
+After the project window starts the matching VS Code Server, they are compared
+and installed through that server's remote extension CLI at matching versions.
+Missing extensions are verified remotely and retried
+individually, so one incompatible extension does not hide the others or require
+clicking “Install in SSH.” Host-only Remote extensions are excluded and any
+remaining incompatible extensions are named in a warning. Review mode does not
 mirror the host extension set.
+
+The public VS Code CLI reports installed extensions, not every per-profile or
+per-workspace enable/disable decision. Newly installed remote extensions are
+enabled by default; explicit disablement remains controlled by VS Code's user,
+remote, and workspace settings.
 
 Pi prompts, themes, skills, and safe settings are mirrored normally. Executable
 Pi extensions/packages are mirrored only when host and sandbox Pi versions
@@ -288,3 +400,6 @@ mirror them from a trusted host profile.
 
 See [SECURITY.md](SECURITY.md) for the threat model and
 [ENVIRONMENT.md](ENVIRONMENT.md) for configuration overrides.
+
+For operating-system compatibility, host requirements, limitations, and
+validation status, see [PLATFORM_SUPPORT.md](PLATFORM_SUPPORT.md).

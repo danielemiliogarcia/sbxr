@@ -31,6 +31,9 @@ not certify dependencies, extensions, or agent output as safe.
 - Allowed registries, GitHub, agent, npm, and VS Code hosts remain reachable;
   hostname allowlisting cannot validate every object served by them.
 - Direct mode lets sandbox code modify the selected project and `.git`.
+- Normal development windows disable VS Code Workspace Trust for that session
+  because the microVM is the execution boundary; clone-mode `review` windows
+  retain Workspace Trust.
 - Claude credentials imported or created in the VM are readable by code
   running as `agent`. Pi's Claude bridge uses that same credential.
 - Mirrored hooks, plugins, skills, prompts, and VS Code extensions execute code
