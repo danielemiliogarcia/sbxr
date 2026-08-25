@@ -126,8 +126,9 @@ pub(crate) enum Action {
     Audit(Option<PathBuf>),
     Review(Option<PathBuf>),
     Name(Option<PathBuf>),
+    Status(Option<PathBuf>),
     Stop(Option<PathBuf>),
-    Remove(Option<PathBuf>),
+    Remove { path: Option<PathBuf>, force: bool },
     Setup,
     Doctor,
     Help,
@@ -152,6 +153,9 @@ impl Action {
                 _ => Self::Help,
             });
         }
+        if command == "rm" {
+            return Self::parse_remove(&arguments[1..]);
+        }
         if arguments.len() > 2 {
             return Err("expected at most one project path".to_owned());
         }
@@ -169,11 +173,31 @@ impl Action {
             "audit" => Self::Audit(path),
             "review" => Self::Review(path),
             "name" => Self::Name(path),
+            "status" => Self::Status(path),
             "stop" => Self::Stop(path),
-            "rm" => Self::Remove(path),
             _ if arguments.len() == 1 => Self::New(Some(PathBuf::from(&arguments[0]))),
             _ => return Err(format!("unknown command: {command}")),
         })
+    }
+
+    fn parse_remove(arguments: &[OsString]) -> Result<Self, String> {
+        let mut path = None;
+        let mut force = false;
+        for argument in arguments {
+            if argument == "--force" {
+                if force {
+                    return Err("rm accepts --force only once".to_owned());
+                }
+                force = true;
+            } else if argument.to_string_lossy().starts_with('-') {
+                return Err(format!("unknown rm option: {}", argument.to_string_lossy()));
+            } else if path.is_some() {
+                return Err("rm accepts at most one project path".to_owned());
+            } else {
+                path = Some(PathBuf::from(argument));
+            }
+        }
+        Ok(Self::Remove { path, force })
     }
 
     pub(crate) fn path(&self) -> Option<&Path> {
@@ -190,8 +214,9 @@ impl Action {
             | Self::Audit(path)
             | Self::Review(path)
             | Self::Name(path)
-            | Self::Stop(path)
-            | Self::Remove(path) => path.as_deref(),
+            | Self::Status(path)
+            | Self::Stop(path) => path.as_deref(),
+            Self::Remove { path, .. } => path.as_deref(),
             Self::Setup | Self::Doctor | Self::Help => None,
         }
     }
@@ -208,8 +233,9 @@ impl Action {
             | Self::AuthImport(_)
             | Self::AuthStatus(_)
             | Self::Audit(_)
+            | Self::Status(_)
             | Self::Stop(_)
-            | Self::Remove(_) => &["sbx"],
+            | Self::Remove { .. } => &["sbx"],
             Self::Name(_) | Self::Setup | Self::Doctor | Self::Help => &[],
         }
     }
@@ -255,8 +281,9 @@ Usage:
   sbxr audit [PATH]        Run cargo-audit, cargo-deny, and cargo-vet
   sbxr review [PATH]       Open a no-OAuth clone-mode review sandbox
   sbxr name [PATH]         Print the deterministic sandbox name
+  sbxr status [PATH]       Check whether the project sandbox exists
   sbxr stop [PATH]         Stop the project sandbox
-  sbxr rm [PATH]           Remove sandbox state; host files remain
+  sbxr rm [--force] [PATH] Remove sandbox state; host files remain
   sbxr setup               Configure missing login, OAuth, and Remote-SSH
   sbxr doctor              Check host prerequisites and vendored kits
   sbxr help
@@ -287,6 +314,25 @@ mod tests {
             Action::Code(Some(_))
         ));
         assert!(matches!(
+            Action::parse(vec!["status".into()]).unwrap(),
+            Action::Status(None)
+        ));
+        assert!(matches!(
+            Action::parse(vec!["rm".into(), "--force".into()]).unwrap(),
+            Action::Remove {
+                path: None,
+                force: true
+            }
+        ));
+        assert!(matches!(
+            Action::parse(vec!["rm".into(), "/tmp/project".into(), "--force".into()]).unwrap(),
+            Action::Remove {
+                path: Some(_),
+                force: true
+            }
+        ));
+        assert!(Action::parse(vec!["rm".into(), "--unknown".into()]).is_err());
+        assert!(matches!(
             Action::parse(vec![".".into()]).unwrap(),
             Action::New(Some(_))
         ));
@@ -315,13 +361,20 @@ mod tests {
         assert!(!shell.needs_vscode_remote_ssh());
         assert!(shell.needs_kvm());
 
-        let remove = Action::Remove(None);
+        let remove = Action::Remove {
+            path: None,
+            force: false,
+        };
         assert_eq!(remove.required_host_commands(), ["sbx"]);
         assert!(!remove.needs_kvm());
 
         let name = Action::Name(None);
         assert!(name.required_host_commands().is_empty());
         assert!(!name.needs_kvm());
+
+        let status = Action::Status(None);
+        assert_eq!(status.required_host_commands(), ["sbx"]);
+        assert!(!status.needs_kvm());
     }
 
     #[test]

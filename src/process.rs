@@ -130,28 +130,6 @@ pub fn shell_quote(value: &OsStr) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
-pub fn json_sandbox_names(json: &[u8]) -> Vec<String> {
-    let text = String::from_utf8_lossy(json);
-    let mut names = Vec::new();
-    let mut remainder = text.as_ref();
-    while let Some(key) = remainder.find("\"name\"") {
-        remainder = &remainder[key + 6..];
-        let Some(colon) = remainder.find(':') else {
-            break;
-        };
-        remainder = remainder[colon + 1..].trim_start();
-        let Some(value) = remainder.strip_prefix('"') else {
-            continue;
-        };
-        let Some(end) = value.find('"') else {
-            break;
-        };
-        names.push(value[..end].to_owned());
-        remainder = &value[end + 1..];
-    }
-    names
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,11 +138,5 @@ mod tests {
     fn quotes_for_posix_shell() {
         assert_eq!(shell_quote(OsStr::new("hello world")), "'hello world'");
         assert_eq!(shell_quote(OsStr::new("it's")), "'it'\\''s'");
-    }
-
-    #[test]
-    fn extracts_sandbox_names() {
-        let json = br#"[{"name":"first"},{"name": "second"}]"#;
-        assert_eq!(json_sandbox_names(json), ["first", "second"]);
     }
 }

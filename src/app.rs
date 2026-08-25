@@ -97,6 +97,13 @@ pub(crate) fn run() -> Result<i32, String> {
             vscode::open(&context, &project.review_name, &project.path, false)?;
         }
         Action::Name(_) => println!("{}", project.name),
+        Action::Status(_) => {
+            return Ok(if sandbox::show_status(&context, &project)? {
+                0
+            } else {
+                1
+            });
+        }
         Action::Stop(_) => {
             process::require("sbx")?;
             process::run_checked(
@@ -106,18 +113,19 @@ pub(crate) fn run() -> Result<i32, String> {
                 "stopping sandbox",
             )?;
         }
-        Action::Remove(_) => {
+        Action::Remove { force, .. } => {
             process::require("sbx")?;
             println!(
                 "Removing sandbox-local state for {}; host project files remain.",
                 project.name
             );
-            process::run_checked(
-                process::sbx_command(context.preserve_xdg_state)
-                    .arg("rm")
-                    .arg(&project.name),
-                "removing sandbox",
-            )?;
+            let mut command = process::sbx_command(context.preserve_xdg_state);
+            command.arg("rm");
+            if force {
+                command.arg("--force");
+            }
+            command.arg(&project.name);
+            process::run_checked(&mut command, "removing sandbox")?;
         }
         Action::Setup | Action::Doctor | Action::Help => unreachable!(),
     }

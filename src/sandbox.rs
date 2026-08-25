@@ -22,9 +22,47 @@ fn sandbox_exists(context: &Context, wanted: &str) -> Result<bool, String> {
         "listing Docker sandboxes",
     )
     .map_err(|error| format!("{error}\nRun `sbx login`, then `sbx diagnose`."))?;
-    Ok(process::json_sandbox_names(&output.stdout)
-        .iter()
-        .any(|name| name == wanted))
+    Ok(sandbox_state_from_json(&output.stdout, wanted)?.is_some())
+}
+
+fn sandbox_state_from_json(json: &[u8], wanted: &str) -> Result<Option<String>, String> {
+    let document: serde_json::Value = serde_json::from_slice(json)
+        .map_err(|error| format!("could not parse Docker sandbox list: {error}"))?;
+    let sandboxes = document
+        .get("sandboxes")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("Docker sandbox list has no sandboxes array")?;
+    Ok(sandboxes.iter().find_map(|sandbox| {
+        (sandbox.get("name").and_then(serde_json::Value::as_str) == Some(wanted)).then(|| {
+            sandbox
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown")
+                .to_owned()
+        })
+    }))
+}
+
+pub(crate) fn show_status(context: &Context, project: &Project) -> Result<bool, String> {
+    process::require("sbx")?;
+    let output = process::output_checked(
+        process::sbx_command(context.preserve_xdg_state).args(["ls", "--json"]),
+        "listing Docker sandboxes",
+    )
+    .map_err(|error| format!("{error}\nRun `sbx login`, then `sbx diagnose`."))?;
+    let state = sandbox_state_from_json(&output.stdout, &project.name)?;
+    println!("sandbox: {}", project.name);
+    println!("project: {}", project.path.display());
+    match state {
+        Some(state) => {
+            println!("status: {state}");
+            Ok(true)
+        }
+        None => {
+            println!("status: not found");
+            Ok(false)
+        }
+    }
 }
 
 pub(crate) fn ensure_dev(
@@ -234,4 +272,27 @@ fi
             .arg(&project.path),
         "auditing Cargo project",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_sandbox_state_in_docker_json() {
+        let json = br#"{
+          "sandboxes": [
+            {"name":"rust-multi-one", "status":"running"},
+            {"name":"rust-multi-two", "status":"stopped"}
+          ]
+        }"#;
+        assert_eq!(
+            sandbox_state_from_json(json, "rust-multi-two").unwrap(),
+            Some("stopped".to_owned())
+        );
+        assert_eq!(
+            sandbox_state_from_json(json, "rust-multi-missing").unwrap(),
+            None
+        );
+    }
 }
