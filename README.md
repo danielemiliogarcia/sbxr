@@ -7,12 +7,11 @@ Its default preset is the complete multi-agent environment.
 
 ## Quick start
 
-From a reviewed `sbxr` checkout:
-
 ```bash
-# ONLY ONCE: install the launcher from its locked, vendored dependencies.
-# Run this again only when installing a newer sbxr version.
-cargo install --frozen --path .
+# ONLY ONCE: install sbxr, or rerun this command to upgrade from master.
+cargo install --locked --force \
+  --git https://github.com/danielemiliogarcia/sbxr.git \
+  --branch master
 
 # ONLY ONCE: configure login/OAuth/Remote-SSH, then verify the host.
 # Setup is safe to rerun later if host configuration changes.
@@ -73,6 +72,24 @@ inside the sandbox.
 
 ## Installation and bootstrap security
 
+Convenient installation or upgrade from the latest public `master` branch:
+
+```bash
+cargo install --locked --force \
+  --git https://github.com/danielemiliogarcia/sbxr.git \
+  --branch master
+```
+
+This follows a mutable branch and downloads the dependency versions selected by
+its `Cargo.lock`. For a reproducible registry-backed installation, replace the
+branch with a reviewed full commit ID:
+
+```bash
+cargo install --locked --force \
+  --git https://github.com/danielemiliogarcia/sbxr.git \
+  --rev FULL_COMMIT_SHA
+```
+
 Hardened, vendored installation from this checkout:
 
 ```bash
@@ -91,18 +108,11 @@ dependency graph in order to install the tool that will isolate later Cargo
 builds. It does not make vendored code intrinsically safe; the reviewed Git
 revision and its vendor diff remain part of the trust decision.
 
-The transparent registry-backed alternative remains available from a reviewed
-Git revision after this repository is published:
-
-```bash
-cargo install --locked --git https://example.com/your-team/sbxr \
-  --rev FULL_COMMIT_SHA
-```
-
-This alternative still enforces `Cargo.lock`, but Cargo may download the exact
-locked registry packages because `cargo install --git` does not discover the
-repository-local Cargo configuration. To use the vendored offline path, clone
-or unpack the reviewed revision and use `cargo install --frozen --path .`.
+The Git-backed alternatives still enforce `Cargo.lock`, but Cargo may download
+the exact locked registry packages because `cargo install --git` does not
+discover the repository-local Cargo configuration. To use the vendored offline
+path, clone or unpack the reviewed revision and use
+`cargo install --frozen --path .`.
 
 `publish = false` currently prevents a misleading `cargo install sbxr`
 claim: no crates.io release exists yet. Release binaries can also be built for
