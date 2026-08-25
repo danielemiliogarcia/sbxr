@@ -106,6 +106,7 @@ pub(crate) fn run() -> Result<i32, String> {
         }
         Action::Stop(_) => {
             process::require("sbx")?;
+            vscode::close_for_stop(&context, &project.name, &project.path)?;
             process::run_checked(
                 process::sbx_command(context.preserve_xdg_state)
                     .arg("stop")

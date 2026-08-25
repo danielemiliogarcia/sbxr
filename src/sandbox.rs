@@ -133,7 +133,7 @@ fn sync_agent_capabilities(
         return Ok(());
     }
     println!(
-        "==> mirroring safe host Codex/Claude/Pi capabilities into {}",
+        "==> mirroring trusted host Codex/Claude/Pi configuration and extensions into {}",
         project.name
     );
     sync::capabilities(

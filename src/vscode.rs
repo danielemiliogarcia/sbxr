@@ -1,5 +1,6 @@
 use crate::environment::Context;
-use crate::process;
+use crate::{process, sync};
+use serde_json::{Map, Value};
 use std::env;
 use std::ffi::OsString;
 use std::path::Path;
@@ -10,6 +11,8 @@ use std::time::{Duration, Instant};
 const REMOTE_SERVER_WAIT: Duration = Duration::from_secs(60);
 const REMOTE_SERVER_POLL: Duration = Duration::from_millis(500);
 const REMOTE_SERVER_ROOT: &str = "/home/agent/.vscode-server/cli/servers";
+const REMOTE_MACHINE_SETTINGS: &str = "/home/agent/.vscode-server/data/Machine/settings.json";
+const REMOTE_WINDOW_CLOSE_WAIT: Duration = Duration::from_secs(30);
 
 pub(crate) fn check_host() -> Result<(), String> {
     process::require("code")?;
@@ -47,12 +50,110 @@ pub(crate) fn open(
         )),
         "opening VS Code",
     )?;
+    println!("==> waiting for the VS Code Server on {sandbox_name}.sbx");
+    let Some(server_cli) = wait_for_remote_server(context, sandbox_name)? else {
+        eprintln!(
+            "warning: VS Code Server was not ready after {} seconds; rerun `sbxr vscode` to finish remote setup",
+            REMOTE_SERVER_WAIT.as_secs()
+        );
+        return Ok(());
+    };
+    configure_terminal_persistence(context, sandbox_name)?;
     if mirror_extensions {
-        sync_extensions(context, sandbox_name)?;
+        sync_extensions(context, sandbox_name, &server_cli)?;
     } else {
         println!("note: host VS Code extensions are not mirrored in review mode");
     }
     Ok(())
+}
+
+pub(crate) fn close_for_stop(
+    context: &Context,
+    sandbox_name: &str,
+    project: &Path,
+) -> Result<(), String> {
+    if !process::command_exists("code") || !remote_window_open(context, sandbox_name)? {
+        return Ok(());
+    }
+    println!("==> asking VS Code to save and close {sandbox_name}.sbx");
+    if !close_remote_windows_with_window_manager(context, sandbox_name)? {
+        let (all_windows, matching_windows) = vscode_window_counts(context, sandbox_name)?;
+        if all_windows != matching_windows || matching_windows != 1 {
+            return Err(format!(
+                "could not address the {sandbox_name}.sbx VS Code window without risking another window. Close that Remote-SSH window manually, then retry `sbxr stop`. On Linux/X11, install `wmctrl` to enable targeted automatic closing. The sandbox was not stopped."
+            ));
+        }
+        close_remote_window_with_code(context, sandbox_name, project)?;
+    }
+
+    let started = Instant::now();
+    loop {
+        if !remote_window_open(context, sandbox_name)? {
+            thread::sleep(Duration::from_millis(500));
+            return Ok(());
+        }
+        if started.elapsed() >= REMOTE_WINDOW_CLOSE_WAIT {
+            return Err(format!(
+                "VS Code did not close the {sandbox_name}.sbx window. Resolve any unsaved-file prompt or close that window manually, then retry `sbxr stop`. The sandbox was not stopped so terminal state is not discarded."
+            ));
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn close_remote_windows_with_window_manager(
+    _context: &Context,
+    sandbox_name: &str,
+) -> Result<bool, String> {
+    if !process::command_exists("wmctrl") {
+        return Ok(false);
+    }
+    let output = process::output_checked(
+        Command::new("wmctrl").arg("-l"),
+        "listing desktop windows before stopping the sandbox",
+    )?;
+    let listing = String::from_utf8_lossy(&output.stdout);
+    let window_ids = remote_window_ids(&listing, sandbox_name);
+    for window_id in &window_ids {
+        process::run_checked(
+            Command::new("wmctrl").args(["-ic", window_id]),
+            "asking the sandbox VS Code window to close",
+        )?;
+    }
+    Ok(!window_ids.is_empty())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn close_remote_windows_with_window_manager(
+    _context: &Context,
+    _sandbox_name: &str,
+) -> Result<bool, String> {
+    Ok(false)
+}
+
+fn close_remote_window_with_code(
+    context: &Context,
+    sandbox_name: &str,
+    project: &Path,
+) -> Result<(), String> {
+    process::run_checked(
+        process::code_command(context.preserve_xdg_state).args([
+            "--remote",
+            &format!("ssh-remote+{sandbox_name}.sbx"),
+            &project.to_string_lossy(),
+        ]),
+        "focusing the sandbox VS Code window",
+    )?;
+    thread::sleep(Duration::from_millis(750));
+    process::run_checked(
+        process::code_command(context.preserve_xdg_state).args([
+            "--reuse-window",
+            "--open-url",
+            "command:workbench.action.closeWindow",
+        ]),
+        "closing the sandbox VS Code window",
+    )
 }
 
 fn remote_open_arguments(
@@ -72,7 +173,98 @@ fn remote_open_arguments(
     arguments
 }
 
-fn sync_extensions(context: &Context, sandbox_name: &str) -> Result<(), String> {
+fn remote_window_open(context: &Context, sandbox_name: &str) -> Result<bool, String> {
+    let (_, matching) = vscode_window_counts(context, sandbox_name)?;
+    Ok(matching != 0)
+}
+
+fn vscode_window_counts(context: &Context, sandbox_name: &str) -> Result<(usize, usize), String> {
+    let output = process::output_checked(
+        process::code_command(context.preserve_xdg_state).arg("--status"),
+        "inspecting VS Code windows before stopping the sandbox",
+    )?;
+    Ok(status_window_counts(
+        &String::from_utf8_lossy(&output.stdout),
+        sandbox_name,
+    ))
+}
+
+fn status_window_counts(status: &str, sandbox_name: &str) -> (usize, usize) {
+    let marker = format!("[SSH: {sandbox_name}.sbx]");
+    status.lines().fold((0, 0), |(all, matching), line| {
+        if !line.contains("window [") {
+            (all, matching)
+        } else {
+            (all + 1, matching + usize::from(line.contains(&marker)))
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn remote_window_ids<'a>(listing: &'a str, sandbox_name: &str) -> Vec<&'a str> {
+    let marker = format!("[SSH: {sandbox_name}.sbx]");
+    listing
+        .lines()
+        .filter(|line| line.contains(&marker))
+        .filter_map(|line| line.split_whitespace().next())
+        .collect()
+}
+
+fn configure_terminal_persistence(context: &Context, sandbox_name: &str) -> Result<(), String> {
+    let existing = sync::remote_file(
+        sandbox_name,
+        context.preserve_xdg_state,
+        REMOTE_MACHINE_SETTINGS,
+    )?;
+    let mut settings = match existing {
+        Some(bytes) => serde_json::from_slice::<Value>(&bytes)
+            .map_err(|error| format!("could not parse remote VS Code machine settings: {error}"))?,
+        None => Value::Object(Map::new()),
+    };
+    let Some(object) = settings.as_object_mut() else {
+        return Err("remote VS Code machine settings must be a JSON object".to_owned());
+    };
+    let wanted = [
+        (
+            "terminal.integrated.enablePersistentSessions",
+            Value::Bool(true),
+        ),
+        (
+            "terminal.integrated.persistentSessionReviveProcess",
+            Value::String("onExitAndWindowClose".to_owned()),
+        ),
+        (
+            "terminal.integrated.persistentSessionScrollback",
+            Value::Number(10_000.into()),
+        ),
+        (
+            "terminal.integrated.shellIntegration.enabled",
+            Value::Bool(true),
+        ),
+    ];
+    let mut changed = false;
+    for (key, value) in wanted {
+        if object.get(key) != Some(&value) {
+            object.insert(key.to_owned(), value);
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    let bytes = serde_json::to_vec_pretty(&settings)
+        .map_err(|error| format!("could not serialize remote VS Code settings: {error}"))?;
+    sync::upload_file(
+        sandbox_name,
+        context.preserve_xdg_state,
+        REMOTE_MACHINE_SETTINGS,
+        &bytes,
+    )?;
+    println!("==> enabled VS Code terminal session revival and persistent scrollback");
+    Ok(())
+}
+
+fn sync_extensions(context: &Context, sandbox_name: &str, server_cli: &str) -> Result<(), String> {
     if env::var("SBXR_SYNC_VSCODE_EXTENSIONS").as_deref() == Ok("0") {
         println!("note: host VS Code extension mirroring is disabled");
         return Ok(());
@@ -87,16 +279,7 @@ fn sync_extensions(context: &Context, sandbox_name: &str) -> Result<(), String> 
         return Ok(());
     }
 
-    println!("==> waiting for the VS Code Server on {sandbox_name}.sbx");
-    let Some(server_cli) = wait_for_remote_server(context, sandbox_name)? else {
-        eprintln!(
-            "warning: VS Code Server was not ready after {} seconds; rerun `sbxr vscode` to mirror extensions",
-            REMOTE_SERVER_WAIT.as_secs()
-        );
-        return Ok(());
-    };
-
-    let remote = remote_extension_listing(context, sandbox_name, &server_cli)?;
+    let remote = remote_extension_listing(context, sandbox_name, server_cli)?;
     let missing = missing_extension_specs(&extensions, &remote);
     if missing.is_empty() {
         println!("==> all compatible host VS Code extensions are already installed remotely");
@@ -107,9 +290,9 @@ fn sync_extensions(context: &Context, sandbox_name: &str) -> Result<(), String> 
         "==> installing {} missing host VS Code extension(s) on {sandbox_name}.sbx",
         missing.len()
     );
-    install_extensions(context, sandbox_name, &server_cli, &missing);
+    install_extensions(context, sandbox_name, server_cli, &missing);
 
-    let remote = remote_extension_listing(context, sandbox_name, &server_cli)?;
+    let remote = remote_extension_listing(context, sandbox_name, server_cli)?;
     let retry = missing_extension_specs(&missing, &remote);
     if !retry.is_empty() {
         println!(
@@ -117,11 +300,11 @@ fn sync_extensions(context: &Context, sandbox_name: &str) -> Result<(), String> 
             retry.len()
         );
         for extension in retry {
-            install_extensions(context, sandbox_name, &server_cli, &[extension]);
+            install_extensions(context, sandbox_name, server_cli, &[extension]);
         }
     }
 
-    let remote = remote_extension_listing(context, sandbox_name, &server_cli)?;
+    let remote = remote_extension_listing(context, sandbox_name, server_cli)?;
     let unresolved = missing_extension_specs(&missing, &remote);
     if unresolved.is_empty() {
         println!("==> verified remote VS Code extension inventory");
@@ -289,6 +472,35 @@ mod tests {
             !arguments
                 .iter()
                 .any(|argument| argument == "--disable-workspace-trust")
+        );
+    }
+
+    #[test]
+    fn identifies_only_the_requested_remote_vscode_window() {
+        let status = r#"
+    0  1000  123 window [1] (local - Visual Studio Code)
+    0  1000  456 window [2] (app [SSH: rust-multi-app-abcd1234.sbx] - Visual Studio Code)
+"#;
+        assert_eq!(
+            status_window_counts(status, "rust-multi-app-abcd1234"),
+            (2, 1)
+        );
+        assert_eq!(
+            status_window_counts(status, "rust-multi-other-deadbeef"),
+            (2, 0)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn identifies_only_requested_remote_desktop_window_ids() {
+        let listing = "\
+0x06600004  0 host sbxr - Visual Studio Code\n\
+0x06600024  0 host smoke [SSH: rust-multi-smoke-a1.sbx] - Visual Studio Code\n\
+0x0660002f  0 host other [SSH: rust-multi-other-b2.sbx] - Visual Studio Code\n";
+        assert_eq!(
+            remote_window_ids(listing, "rust-multi-smoke-a1"),
+            vec!["0x06600024"]
         );
     }
 

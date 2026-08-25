@@ -1,5 +1,6 @@
-use crate::process;
+use crate::{process, sha256};
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -46,9 +47,13 @@ const PI_PATHS: &[&str] = &[
     ".pi/agent/skills",
     ".pi/agent/prompts",
     ".pi/agent/themes",
+    ".pi/agent/npm/package.json",
+    ".pi/agent/npm/package-lock.json",
 ];
 
-const PI_EXTENSION_PATHS: &[&str] = &[".pi/agent/extensions", ".pi/agent/npm"];
+const PI_EXTENSION_PATHS: &[&str] = &[".pi/agent/extensions"];
+const REMOTE_RTK: &str = "/usr/local/bin/rtk";
+const PI_NPM_LOCK_MARKER: &str = "/home/agent/.pi/agent/npm/.sbxr-lock-sha256";
 
 pub fn capabilities(
     sandbox_name: &str,
@@ -60,11 +65,7 @@ pub fn capabilities(
     let home = process::home_dir()?;
     let home_text = home.to_string_lossy();
     let mut selected = Vec::new();
-    let pi_extensions = if pi {
-        pi_extensions_compatible(sandbox_name, preserve_xdg_state)?
-    } else {
-        false
-    };
+    let pi_extensions = pi && pi_extensions_enabled()?;
     if codex {
         selected.extend(existing(&home, CODEX_PATHS));
     }
@@ -92,6 +93,12 @@ pub fn capabilities(
             &selected,
         )?;
     }
+    if claude {
+        mirror_claude_hook_tools(sandbox_name, preserve_xdg_state, &home)?;
+    }
+    if pi {
+        sync_pi_npm_packages(sandbox_name, preserve_xdg_state, &home)?;
+    }
     if codex {
         merge_codex(sandbox_name, preserve_xdg_state, &home, &home_text)?;
     }
@@ -102,12 +109,15 @@ pub fn capabilities(
             &home.join(".claude/settings.json"),
             "/home/agent/.claude/settings.json",
             &home_text,
-            &[
-                "defaultMode",
-                "bypassPermissionsModeAccepted",
-                "skipDangerousModePermissionPrompt",
-            ],
-            &[],
+            JsonMergePolicy {
+                managed_keys: &[
+                    "defaultMode",
+                    "bypassPermissionsModeAccepted",
+                    "skipDangerousModePermissionPrompt",
+                ],
+                excluded_host_keys: &[],
+                filter_unavailable_hooks: true,
+            },
         )?;
     }
     if pi {
@@ -117,14 +127,17 @@ pub fn capabilities(
             &home.join(".pi/agent/settings.json"),
             "/home/agent/.pi/agent/settings.json",
             &home_text,
-            &["defaultProjectTrust", "enableInstallTelemetry"],
-            if pi_extensions { &[] } else { &["packages"] },
+            JsonMergePolicy {
+                managed_keys: &["defaultProjectTrust", "enableInstallTelemetry"],
+                excluded_host_keys: &[],
+                filter_unavailable_hooks: false,
+            },
         )?;
     }
     Ok(())
 }
 
-fn pi_extensions_compatible(sandbox_name: &str, preserve_xdg_state: bool) -> Result<bool, String> {
+fn pi_extensions_enabled() -> Result<bool, String> {
     if let Ok(value) = env::var("SBXR_SYNC_PI_EXTENSIONS") {
         return match value.as_str() {
             "0" => Ok(false),
@@ -132,30 +145,174 @@ fn pi_extensions_compatible(sandbox_name: &str, preserve_xdg_state: bool) -> Res
             _ => Err("SBXR_SYNC_PI_EXTENSIONS must be 0 or 1".to_owned()),
         };
     }
-    let host = Command::new("pi").arg("--version").output().ok();
-    let remote = process::sbx_command(preserve_xdg_state)
-        .args(["exec", sandbox_name, "--", "pi", "--version"])
-        .output()
-        .ok();
-    let version = |output: Option<&std::process::Output>| {
-        output
-            .filter(|output| output.status.success())
-            .and_then(|output| std::str::from_utf8(&output.stdout).ok())
-            .map(str::trim)
-            .filter(|version| !version.is_empty())
-            .map(str::to_owned)
-    };
-    let host_version = version(host.as_ref());
-    let remote_version = version(remote.as_ref());
-    let compatible = host_version.is_some() && host_version == remote_version;
-    if !compatible {
-        eprintln!(
-            "warning: Pi extensions/packages were not mirrored (host {}, sandbox {}); prompts, themes, and safe settings still sync",
-            host_version.as_deref().unwrap_or("missing"),
-            remote_version.as_deref().unwrap_or("missing")
-        );
+    Ok(true)
+}
+
+fn mirror_claude_hook_tools(
+    sandbox_name: &str,
+    preserve_xdg_state: bool,
+    home: &Path,
+) -> Result<(), String> {
+    let settings_path = home.join(".claude/settings.json");
+    if !claude_settings_uses_program(&settings_path, "rtk")? {
+        return Ok(());
     }
-    Ok(compatible)
+    let Some(host_rtk) = process::command_path("rtk") else {
+        return Ok(());
+    };
+    let host_version = command_version(Command::new(&host_rtk).arg("--version"));
+    let remote_version = command_version(process::sbx_command(preserve_xdg_state).args([
+        "exec",
+        sandbox_name,
+        "--",
+        REMOTE_RTK,
+        "--version",
+    ]));
+    if host_version.is_some() && host_version == remote_version {
+        return Ok(());
+    }
+
+    let contents = fs::read(&host_rtk)
+        .map_err(|error| format!("could not read host rtk at {}: {error}", host_rtk.display()))?;
+    upload_root_executable(sandbox_name, preserve_xdg_state, REMOTE_RTK, &contents)?;
+    let installed_version = command_version(process::sbx_command(preserve_xdg_state).args([
+        "exec",
+        sandbox_name,
+        "--",
+        REMOTE_RTK,
+        "--version",
+    ]));
+    if host_version.is_none() || installed_version != host_version {
+        let _ = process::sbx_command(preserve_xdg_state)
+            .args(["exec", "-u", "root", sandbox_name, "rm", "-f", REMOTE_RTK])
+            .status();
+    }
+    Ok(())
+}
+
+fn claude_settings_uses_program(path: &Path, wanted: &str) -> Result<bool, String> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let settings: Value = serde_json::from_slice(
+        &fs::read(path).map_err(|error| format!("could not read {}: {error}", path.display()))?,
+    )
+    .map_err(|error| format!("could not parse {}: {error}", path.display()))?;
+    Ok(settings_uses_hook_program(&settings, wanted))
+}
+
+fn settings_uses_hook_program(settings: &Value, wanted: &str) -> bool {
+    let Some(events) = settings.get("hooks").and_then(Value::as_object) else {
+        return false;
+    };
+    events.values().any(|groups| {
+        groups.as_array().is_some_and(|groups| {
+            groups.iter().any(|group| {
+                group
+                    .get("hooks")
+                    .and_then(Value::as_array)
+                    .is_some_and(|hooks| {
+                        hooks.iter().any(|hook| {
+                            hook.get("command")
+                                .and_then(Value::as_str)
+                                .and_then(hook_program)
+                                == Some(wanted)
+                        })
+                    })
+            })
+        })
+    })
+}
+
+fn command_version(command: &mut Command) -> Option<String> {
+    command.output().ok().and_then(|output| {
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    })
+}
+
+fn upload_root_executable(
+    sandbox_name: &str,
+    preserve_xdg_state: bool,
+    path: &str,
+    contents: &[u8],
+) -> Result<(), String> {
+    let mut child = process::sbx_command(preserve_xdg_state)
+        .args(["exec", "-u", "root", "-i", sandbox_name, "tee", path])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("could not write remote executable {path}: {error}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or("remote executable stdin was unavailable")?
+        .write_all(contents)
+        .map_err(|error| format!("could not stream remote executable {path}: {error}"))?;
+    let status = child
+        .wait()
+        .map_err(|error| format!("could not finish remote executable {path}: {error}"))?;
+    if !status.success() {
+        return Err(format!(
+            "writing remote executable {path} failed with {status}"
+        ));
+    }
+    process::run_checked(
+        process::sbx_command(preserve_xdg_state).args([
+            "exec",
+            "-u",
+            "root",
+            sandbox_name,
+            "chmod",
+            "755",
+            path,
+        ]),
+        "setting mirrored hook-tool permissions",
+    )
+}
+
+fn sync_pi_npm_packages(
+    sandbox_name: &str,
+    preserve_xdg_state: bool,
+    home: &Path,
+) -> Result<(), String> {
+    let lock_path = home.join(".pi/agent/npm/package-lock.json");
+    let package_path = home.join(".pi/agent/npm/package.json");
+    if !lock_path.is_file() || !package_path.is_file() {
+        return Ok(());
+    }
+    let lock = fs::read(&lock_path)
+        .map_err(|error| format!("could not read {}: {error}", lock_path.display()))?;
+    let wanted = sha256::hex_prefix(&lock, 32);
+    let current = remote_file(sandbox_name, preserve_xdg_state, PI_NPM_LOCK_MARKER)?
+        .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned());
+    if current.as_deref() == Some(&wanted) {
+        return Ok(());
+    }
+    process::run_checked(
+        process::sbx_command(preserve_xdg_state).args([
+            "exec",
+            sandbox_name,
+            "--",
+            "npm",
+            "ci",
+            "--legacy-peer-deps",
+            "--ignore-scripts",
+            "--no-audit",
+            "--no-fund",
+            "--prefix",
+            "/home/agent/.pi/agent/npm",
+        ]),
+        "installing exact host Pi extension packages",
+    )?;
+    upload_file(
+        sandbox_name,
+        preserve_xdg_state,
+        PI_NPM_LOCK_MARKER,
+        wanted.as_bytes(),
+    )
 }
 
 fn existing(home: &Path, paths: &'static [&'static str]) -> impl Iterator<Item = PathBuf> {
@@ -365,14 +522,19 @@ fn toml_tables(input: &str, allowed: &[&str]) -> String {
     output
 }
 
+struct JsonMergePolicy<'a> {
+    managed_keys: &'a [&'a str],
+    excluded_host_keys: &'a [&'a str],
+    filter_unavailable_hooks: bool,
+}
+
 fn merge_json_settings(
     sandbox_name: &str,
     preserve_xdg_state: bool,
     host_path: &Path,
     remote_path: &str,
     host_home: &str,
-    managed_keys: &[&str],
-    excluded_host_keys: &[&str],
+    policy: JsonMergePolicy<'_>,
 ) -> Result<(), String> {
     if !host_path.is_file() {
         return Ok(());
@@ -383,18 +545,23 @@ fn merge_json_settings(
     )
     .map_err(|error| format!("could not parse {}: {error}", host_path.display()))?;
     replace_json_paths(&mut host, host_home);
+    if policy.filter_unavailable_hooks {
+        prune_unavailable_claude_hooks(&mut host, |program| {
+            remote_program_exists(sandbox_name, preserve_xdg_state, program)
+        })?;
+    }
     let managed = remote_file(sandbox_name, preserve_xdg_state, remote_path)?
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .unwrap_or_else(|| Value::Object(Map::new()));
     let mut merged = managed.clone();
     if let (Some(target), Some(source)) = (merged.as_object_mut(), host.as_object()) {
         for (key, value) in source {
-            if !excluded_host_keys.contains(&key.as_str()) {
+            if !policy.excluded_host_keys.contains(&key.as_str()) {
                 target.insert(key.clone(), value.clone());
             }
         }
         if let Some(original) = managed.as_object() {
-            for key in managed_keys {
+            for key in policy.managed_keys {
                 if let Some(value) = original.get(*key) {
                     target.insert((*key).to_owned(), value.clone());
                 }
@@ -404,6 +571,106 @@ fn merge_json_settings(
     let bytes = serde_json::to_vec_pretty(&merged)
         .map_err(|error| format!("could not serialize merged settings: {error}"))?;
     upload_file(sandbox_name, preserve_xdg_state, remote_path, &bytes)
+}
+
+fn prune_unavailable_claude_hooks<F>(
+    settings: &mut Value,
+    mut program_exists: F,
+) -> Result<(), String>
+where
+    F: FnMut(&str) -> Result<bool, String>,
+{
+    let Some(events) = settings.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return Ok(());
+    };
+    let mut availability = HashMap::new();
+    for groups in events.values_mut() {
+        let Some(groups) = groups.as_array_mut() else {
+            continue;
+        };
+        let mut kept_groups = Vec::new();
+        for mut group in std::mem::take(groups) {
+            let Some(entries) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+                kept_groups.push(group);
+                continue;
+            };
+            let mut kept_entries = Vec::new();
+            for entry in std::mem::take(entries) {
+                let command = entry.get("command").and_then(Value::as_str);
+                let program = command.and_then(hook_program);
+                let available = match program {
+                    Some(program) => {
+                        if let Some(available) = availability.get(program) {
+                            *available
+                        } else {
+                            let available = program_exists(program)?;
+                            availability.insert(program.to_owned(), available);
+                            available
+                        }
+                    }
+                    None => true,
+                };
+                if available {
+                    kept_entries.push(entry);
+                } else if let (Some(program), Some(command)) = (program, command) {
+                    if !quietly_omitted_hook_program(program) {
+                        eprintln!(
+                            "warning: skipped host Claude hook because '{program}' is unavailable in the sandbox: {command}"
+                        );
+                    }
+                }
+            }
+            *entries = kept_entries;
+            if !entries.is_empty() {
+                kept_groups.push(group);
+            }
+        }
+        *groups = kept_groups;
+    }
+    events.retain(|_, groups| groups.as_array().is_none_or(|groups| !groups.is_empty()));
+    Ok(())
+}
+
+fn quietly_omitted_hook_program(program: &str) -> bool {
+    matches!(program, "paplay" | "afplay")
+}
+
+fn hook_program(command: &str) -> Option<&str> {
+    let program = command.split_whitespace().next()?;
+    if program.is_empty()
+        || program.contains('=')
+        || program
+            .chars()
+            .any(|character| "'\"$;&|<>(){}!".contains(character))
+        || matches!(program, "if" | "for" | "while" | "until" | "case")
+    {
+        None
+    } else {
+        Some(program)
+    }
+}
+
+fn remote_program_exists(
+    sandbox_name: &str,
+    preserve_xdg_state: bool,
+    program: &str,
+) -> Result<bool, String> {
+    let status = process::sbx_command(preserve_xdg_state)
+        .args([
+            "exec",
+            sandbox_name,
+            "--",
+            "sh",
+            "-lc",
+            "command -v -- \"$1\" >/dev/null 2>&1",
+            "sh",
+            program,
+        ])
+        .status()
+        .map_err(|error| {
+            format!("could not inspect sandbox hook dependency '{program}': {error}")
+        })?;
+    Ok(status.success())
 }
 
 fn replace_json_paths(value: &mut Value, host_home: &str) {
@@ -423,7 +690,7 @@ fn replace_json_paths(value: &mut Value, host_home: &str) {
     }
 }
 
-fn remote_file(
+pub(crate) fn remote_file(
     sandbox_name: &str,
     preserve_xdg_state: bool,
     path: &str,
@@ -435,7 +702,7 @@ fn remote_file(
     Ok(output.status.success().then_some(output.stdout))
 }
 
-fn upload_file(
+pub(crate) fn upload_file(
     sandbox_name: &str,
     preserve_xdg_state: bool,
     path: &str,
@@ -481,6 +748,9 @@ impl<'a, W: Write> TarWriter<'a, W> {
             return Ok(());
         }
         if metadata.file_type().is_symlink() {
+            if fs::metadata(source).is_err() {
+                return Ok(());
+            }
             let target = fs::read_link(source)
                 .map_err(|error| format!("could not read symlink {}: {error}", source.display()))?;
             let target = target.to_string_lossy().replace(host_home, "/home/agent");
@@ -648,5 +918,50 @@ mod tests {
             statusline_relative_path("bash /tmp/untrusted.sh", "/home/dev"),
             None
         );
+    }
+
+    #[test]
+    fn removes_claude_hooks_with_missing_sandbox_commands() {
+        let mut settings = serde_json::json!({
+            "hooks": {
+                "Stop": [{"hooks": [
+                    {"type": "command", "command": "paplay complete.oga"},
+                    {"type": "command", "command": "bash /home/agent/.claude/hooks/done.sh"}
+                ]}],
+                "PreToolUse": [{"hooks": [
+                    {"type": "command", "command": "rtk hook claude"}
+                ]}]
+            }
+        });
+        prune_unavailable_claude_hooks(&mut settings, |program| Ok(program == "bash")).unwrap();
+        let text = serde_json::to_string(&settings).unwrap();
+        assert!(text.contains("bash /home/agent/.claude/hooks/done.sh"));
+        assert!(!text.contains("paplay"));
+        assert!(!text.contains("rtk"));
+        assert!(settings["hooks"].get("PreToolUse").is_none());
+    }
+
+    #[test]
+    fn recognizes_only_simple_hook_programs() {
+        assert_eq!(hook_program("paplay sound.oga"), Some("paplay"));
+        assert_eq!(hook_program("bash '/home/agent/hook.sh'"), Some("bash"));
+        assert_eq!(hook_program("FLAG=1 command"), None);
+        assert_eq!(hook_program("if command -v tool; then tool; fi"), None);
+        assert!(quietly_omitted_hook_program("paplay"));
+        assert!(quietly_omitted_hook_program("afplay"));
+        assert!(!quietly_omitted_hook_program("rtk"));
+    }
+
+    #[test]
+    fn detects_claude_hook_tool_usage() {
+        let settings = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{"hooks": [
+                    {"type": "command", "command": "rtk hook claude"}
+                ]}]
+            }
+        });
+        assert!(settings_uses_hook_program(&settings, "rtk"));
+        assert!(!settings_uses_hook_program(&settings, "paplay"));
     }
 }

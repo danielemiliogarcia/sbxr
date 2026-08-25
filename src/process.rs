@@ -8,25 +8,32 @@ use std::process::{Command, Output};
 use std::os::unix::fs::PermissionsExt;
 
 pub fn command_exists(name: &str) -> bool {
-    let Some(path) = env::var_os("PATH") else {
-        return false;
-    };
-    env::split_paths(&path).any(|directory| {
-        if executable(directory.join(name)) {
-            return true;
+    command_path(name).is_some()
+}
+
+pub fn command_path(name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path).find_map(|directory| {
+        let direct = directory.join(name);
+        if executable(direct.clone()) {
+            return Some(direct);
         }
         #[cfg(windows)]
         {
             let extensions = env::var_os("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
-            return extensions.to_string_lossy().split(';').any(|extension| {
-                executable(directory.join(format!("{name}{}", extension.to_ascii_lowercase())))
-                    || executable(
-                        directory.join(format!("{name}{}", extension.to_ascii_uppercase())),
-                    )
-            });
+            for extension in extensions.to_string_lossy().split(';') {
+                for extension in [
+                    extension.to_ascii_lowercase(),
+                    extension.to_ascii_uppercase(),
+                ] {
+                    let candidate = directory.join(format!("{name}{extension}"));
+                    if executable(candidate.clone()) {
+                        return Some(candidate);
+                    }
+                }
+            }
         }
-        #[cfg(not(windows))]
-        false
+        None
     })
 }
 
