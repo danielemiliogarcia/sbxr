@@ -59,6 +59,40 @@ Linux is currently the only host platform supported by the optional
 `--rocksdb-host` acceleration. Without that option, RocksDB and other native
 dependencies build normally inside the sandbox.
 
+For targeted graceful closing before `sbxr stop`, install `wmctrl` on an X11
+desktop (`sudo apt-get install wmctrl` on Ubuntu). If the window cannot be
+targeted safely, `sbxr` does not stop the microVM until the developer closes
+that Remote-SSH window manually. Native Wayland, macOS, and Windows automatic
+window closing still require dedicated live validation.
+
+## VS Code state across a microVM stop
+
+`sbxr stop` closes the matching Remote-SSH window gracefully before powering
+off the microVM. VS Code stores its window/workspace state on the host, while
+the remote VS Code Server data remains on the sandbox's persistent disk. The
+launcher also enables VS Code's terminal process-revive settings and requests
+10,000 lines of persistent scrollback.
+
+A powered-off microVM cannot retain processes that existed only in guest RAM,
+including the remote PTY host and shells. VS Code therefore has to relaunch the
+shells and replay its serialized terminal buffer on the next connection; this
+is different from closing and reopening VS Code while the sandbox remains
+running, where it can reconnect to the original PTY. VS Code documents these
+as [process revive and process reconnection](https://code.visualstudio.com/docs/terminal/advanced/#_persistent-sessions).
+
+Live testing with VS Code 1.134.0 and Remote-SSH 0.124.0 confirmed that `sbxr`
+successfully caused the terminal snapshot—including command/output text—to be
+written to the host workspace database. That VS Code release consumed the
+snapshot and recreated the terminal tab and shell after `sbx stop`, but did not
+render the saved scrollback. Full remote session persistence across loss of the
+remote host is also still an open upstream feature area; see
+[microsoft/vscode#320044](https://github.com/microsoft/vscode/issues/320044).
+Consequently, terminal tabs and working directories should revive, but exact
+scrollback restoration after a full microVM stop is currently best-effort and
+must be retested when VS Code or Remote-SSH changes. Persistent project files,
+agent configuration, installed extensions, and normal remote workspace state
+are unaffected by this limitation.
+
 ## macOS
 
 Docker Sandboxes currently requires macOS Sonoma 14 or newer and Apple

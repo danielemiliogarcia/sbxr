@@ -39,6 +39,8 @@ directory above; an empty directory is initialized with Cargo automatically.
   Docker Desktop and Docker Engine are not required just to use `sbx`.
 - Rust and Cargo 1.85 or newer to build and install `sbxr` from source.
 - Native VS Code with the `code` command on `PATH`, plus an OpenSSH client.
+- On Linux/X11, `wmctrl` is recommended so `sbxr stop` can gracefully close
+  only the matching Remote-SSH window (`sudo apt-get install wmctrl` on Ubuntu).
 - Git is recommended and is required for `sbxr review`.
 - A ChatGPT subscription, Claude subscription, or both, depending on the
   selected preset. Authentication uses the providers' OAuth login flows; API
@@ -63,7 +65,8 @@ The default `rust-multi-agent` preset combines:
 - pinned Pi, connected to the Docker-managed Codex OAuth proxy and able to
   detect the sandbox-local Claude login;
 - VS Code Remote-SSH, including version-matched host extension installation;
-- safe Codex, Claude, and Pi capability/configuration mirroring.
+- trusted-host Codex, Claude, and Pi extension/plugin and configuration
+  mirroring, with credentials and runtime state excluded.
 
 The host launcher and its configuration-copy implementation are Rust. It ships
 no host shell helper and embeds all kit specifications in the executable. The
@@ -98,6 +101,20 @@ sandbox. It prints the deterministic name, resolved project path, and
 `running`, `stopped`, or `not found`. Its exit status is `0` when the sandbox
 exists and `1` when it does not, making it suitable for scripts. Like sandbox
 names, the result is preset- and optional-RocksDB-specific.
+
+When the matching Remote-SSH window is open, `sbxr stop` asks that exact VS
+Code window to close normally and waits before stopping the microVM. This gives
+VS Code time to serialize terminal tabs, process metadata, command history, and
+scrollback; other VS Code windows are left alone. An unsaved-file prompt must
+be resolved before stopping proceeds. Linux/X11 uses `wmctrl` to address the
+exact window; if safe targeted closing is unavailable, `sbxr` leaves the
+sandbox running and asks for a manual close. On the next `sbxr new`, VS Code
+uses its process-revive support to recreate terminal shells from the saved
+session metadata, with up to 10,000 lines requested for persistent scrollback.
+Long-running processes cannot continue while the microVM is powered off.
+Terminal-tab, working-directory, and scrollback restoration ultimately depends
+on the installed VS Code/Remote-SSH release; see
+[Platform support](PLATFORM_SUPPORT.md#vscode-state-across-a-microvm-stop).
 
 No custom environment variables are required. Optional preset, naming,
 storage, mirroring, RocksDB, and authentication-import overrides are documented
@@ -135,8 +152,9 @@ That ready-to-code experience includes:
   definition, and source navigation across the project and available imported
   crate sources;
 - an immediately familiar colored Bash prompt with the current Git branch;
-- allowlisted Codex, Claude, and Pi instructions, skills, hooks, prompts,
-  themes, plugins, and status-line customizations mirrored from the host;
+- installed Codex, Claude, and Pi extensions/plugins plus instructions, skills,
+  hooks, prompts, themes, and status-line customizations mirrored from the
+  trusted host profile;
 - compatible host VS Code extensions installed at matching versions in the
   remote extension host, with server-side verification and retries;
 - the normal development folder opened without a redundant Workspace Trust
@@ -341,13 +359,24 @@ refreshing this credential. Pi documents third-party Claude OAuth use as
 Anthropic “extra usage,” potentially billed per token rather than against the
 normal plan allowance.
 
-The launcher mirrors an allowlist of useful host configuration: instructions,
+The launcher mirrors the installed extension/plugin payloads in each agent's
+documented configuration tree, plus useful host configuration: instructions,
 skills, hooks, prompts, status-line scripts (including a script referenced from
-Claude's `statusLine.command`), themes, and plugin metadata/cache.
+Claude's `statusLine.command`), themes, and plugin metadata/cache. Codex and
+Claude plugin caches are copied; Pi source extensions are copied and Pi npm
+extension packages are reinstalled at the exact versions in the host lockfile.
 It excludes authentication files, histories, sessions, logs, project trust
 records, runtime state, and Codex system-managed skills. Host paths in copied
 text are rewritten to `/home/agent`, while Docker-managed provider and safety
 settings win during merges.
+
+Before merging Claude settings, `sbxr` checks simple host hook commands against
+the sandbox. The recognized `rtk hook claude` integration is mirrored from the
+host as an exact executable and version-checked. A desktop-audio hook using
+`paplay` or `afplay` is omitted quietly because the sandbox has no host audio
+session. Other unavailable commands are omitted with a warning instead of
+failing on every event. Hooks backed by available commands and mirrored scripts
+continue to work normally; `sbxr` does not install arbitrary hook dependencies.
 
 VS Code extensions are read from `code --list-extensions --show-versions`.
 After the project window starts the matching VS Code Server, they are compared
@@ -363,9 +392,12 @@ per-workspace enable/disable decision. Newly installed remote extensions are
 enabled by default; explicit disablement remains controlled by VS Code's user,
 remote, and workspace settings.
 
-Pi prompts, themes, skills, and safe settings are mirrored normally. Executable
-Pi extensions/packages are mirrored only when host and sandbox Pi versions
-match. Mirroring controls and their compatibility override are documented in
+Pi prompts, themes, skills, settings, and source extensions are mirrored by
+default. npm-based Pi extensions are installed without lifecycle scripts from
+the host `package-lock.json`, preserving its exact resolved versions instead of
+copying a host `node_modules` tree built for a potentially different Pi or
+platform. Set `SBXR_SYNC_PI_EXTENSIONS=0` to omit raw source extensions; package
+declarations still follow the mirrored Pi settings. Details are in
 [ENVIRONMENT.md](ENVIRONMENT.md#mirroring-controls).
 
 Mirrored hooks, plugins, skills, and extensions are executable software. Only
@@ -403,3 +435,7 @@ See [SECURITY.md](SECURITY.md) for the threat model and
 
 For operating-system compatibility, host requirements, limitations, and
 validation status, see [PLATFORM_SUPPORT.md](PLATFORM_SUPPORT.md).
+
+## Limitations
+
+After a microVM stop, VS Code Remote-SSH may restore terminal tabs but lose their scrollback due to a VS Code limitation/bug; [details and tested versions](PLATFORM_SUPPORT.md#vscode-state-across-a-microvm-stop).

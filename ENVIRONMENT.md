@@ -13,9 +13,9 @@ over equivalent environment variables.
 | `SBXR_ROOT` | Directory path | Root for materialized embedded kits; see platform defaults below |
 | `SBXR_KIT_ROOT` | Directory path | Uses external kit directories instead of materializing the embedded kits |
 | `SBXR_ROCKSDB_HOST` | RocksDB installation prefix | Unset and disabled; overridden by `--rocksdb-host[=PREFIX]` |
-| `SBXR_SYNC_AGENT_CONFIG` | `0` to disable | Safe Codex, Claude, and Pi capability mirroring is enabled |
+| `SBXR_SYNC_AGENT_CONFIG` | `0` to disable | Trusted-host Codex, Claude, and Pi extension/plugin and configuration mirroring is enabled |
 | `SBXR_SYNC_VSCODE_EXTENSIONS` | `0` to disable | Host VS Code extension mirroring is enabled |
-| `SBXR_SYNC_PI_EXTENSIONS` | `0` or `1` | Unset means executable Pi extensions/packages are copied only when host and sandbox Pi versions match |
+| `SBXR_SYNC_PI_EXTENSIONS` | `0` or `1` | Unset/`1` mirrors raw Pi source extensions; `0` omits them |
 | `SBXR_CLAUDE_AUTH_FILE` | File path | `~/.claude/.credentials.json`; used by the first-open import offer and `auth-import` |
 | `SBXR_YES` | `1` to confirm | Automatically accepts the first-open Claude import offer and non-interactive `auth-import` |
 | `SBXR_PRESERVE_XDG_STATE_HOME` | `1` to preserve | `XDG_STATE_HOME` is removed from child `sbx` and VS Code commands |
@@ -98,14 +98,20 @@ Disable host VS Code extension mirroring:
 SBXR_SYNC_VSCODE_EXTENSIONS=0 sbxr new .
 ```
 
-Pi prompts, themes, skills, and safe settings are normally mirrored. Executable
-Pi extensions/packages additionally require matching host and sandbox Pi
-versions. Override that decision only after a compatibility and trust review:
+Pi prompts, themes, skills, settings, and raw source extensions are normally
+mirrored. npm-based extensions are resolved with `npm ci` from the copied host
+lockfile, with lifecycle scripts disabled, so their exact locked versions are
+installed for the sandbox instead of copying platform-specific `node_modules`.
+Disable copying raw source extensions when the host profile is not trusted:
 
 ```bash
-SBXR_SYNC_PI_EXTENSIONS=0 sbxr new .  # always disable executable Pi additions
-SBXR_SYNC_PI_EXTENSIONS=1 sbxr new .  # force-enable them
+SBXR_SYNC_PI_EXTENSIONS=0 sbxr new .  # omit raw source extensions
+SBXR_SYNC_PI_EXTENSIONS=1 sbxr new .  # explicitly enable them (the default)
 ```
+
+The setting does not remove Pi package declarations from a mirrored
+`settings.json`; use `SBXR_SYNC_AGENT_CONFIG=0` to disable all agent capability
+and configuration mirroring.
 
 ## Authentication import variables
 

@@ -38,6 +38,15 @@ not certify dependencies, extensions, or agent output as safe.
   running as `agent`. Pi's Claude bridge uses that same credential.
 - Mirrored hooks, plugins, skills, prompts, and VS Code extensions execute code
   and expand the trusted computing base.
+- The recognized `rtk hook claude` executable is copied from the trusted host
+  and version-checked. Desktop-audio hooks are omitted quietly because the VM
+  has no host audio session. Other simple Claude hooks whose leading executable
+  is unavailable are omitted with a warning; `sbxr` never installs arbitrary
+  host-hook dependencies automatically.
+- Pi npm extension packages are installed at the exact host-lockfile versions
+  with lifecycle scripts disabled. Their runtime code, raw Pi extensions, and
+  mirrored Codex/Claude plugins still execute in the sandbox and must be
+  treated as trusted code.
 - `--rocksdb-host` trusts the selected host-built shared library and its ABI.
   The prefix is read-only, but a compromised or incompatible library still
   executes inside the sandbox process and can affect the mounted project.

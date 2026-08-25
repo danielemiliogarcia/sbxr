@@ -253,6 +253,17 @@ report the local inventory for that form. The development window must not show
 a Workspace Trust prompt, while `sbxr review` must retain Workspace Trust.
 Close the window with multiple terminal tabs open, run `sbxr new` again, and
 verify VS Code restores the remote window and its persistent terminal state.
+Then run `sbxr stop` while the remote window is open: only that window should
+close, the sandbox should stop after the window disappears, and the next
+`sbxr new` should exercise VS Code's process-revive path. Verify terminal tabs,
+working directories, history, and scrollback separately, and inspect the host
+workspace database plus the remote `ptyhost.log` when any part is missing; do
+not infer scrollback persistence merely from the tab reappearing. Record the
+exact VS Code and Remote-SSH versions because remote scrollback restoration is
+currently best-effort as described in `PLATFORM_SUPPORT.md`. Cancel an
+unsaved-file prompt once and confirm the stop is aborted without powering off
+the sandbox. On Linux/X11, exercise this with `wmctrl` installed and with
+another unrelated VS Code window open.
 
 ## Before handing off a change
 
