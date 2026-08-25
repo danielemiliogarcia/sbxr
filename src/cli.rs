@@ -158,7 +158,7 @@ impl Action {
         let path = arguments.get(1).map(PathBuf::from);
         Ok(match command.as_ref() {
             "new" => Self::New(path),
-            "code" => Self::Code(path),
+            "code" | "vscode" => Self::Code(path),
             "up" => Self::Up(path),
             "shell" => Self::Shell(path),
             "codex" => Self::Codex(path),
@@ -243,7 +243,8 @@ pub(crate) fn print_usage() {
 Usage:
   sbxr [--preset PRESET] [--rocksdb-host[=PREFIX]] [new] [PATH]
   sbxr [new] [PATH]        Create/reuse the sandbox and open VS Code
-  sbxr code [PATH]         Alias for `sbxr new`
+  sbxr vscode [PATH]       Explicit alias for `sbxr new`
+  sbxr code [PATH]         Legacy alias for `sbxr new`
   sbxr up [PATH]           Create/reuse without attaching
   sbxr shell [PATH]        Open a login shell in the sandbox
   sbxr codex [PATH]        Run Codex with a ChatGPT subscription
@@ -280,6 +281,10 @@ mod tests {
         assert!(matches!(
             Action::parse(vec!["up".into(), "/tmp/project".into()]).unwrap(),
             Action::Up(Some(_))
+        ));
+        assert!(matches!(
+            Action::parse(vec!["vscode".into(), "/tmp/project".into()]).unwrap(),
+            Action::Code(Some(_))
         ));
         assert!(matches!(
             Action::parse(vec![".".into()]).unwrap(),

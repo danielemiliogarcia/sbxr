@@ -183,6 +183,7 @@ accidentally reusing a VM with a different agent composition.
 | Command | Purpose |
 |---|---|
 | `sbxr new .` | Create/reuse and open VS Code |
+| `sbxr vscode .` | Explicit alias for `sbxr new .` |
 | `sbxr up .` | Create/reuse without attaching |
 | `sbxr shell .` | Open a project shell |
 | `sbxr codex .` | Run Codex |
