@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.2.0] - 2026-08-26
+
 ### Added
 
 - Added `sbxr inspect [PATH]`, a read-only view of the project-specific sandbox
