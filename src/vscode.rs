@@ -12,6 +12,7 @@ const REMOTE_SERVER_WAIT: Duration = Duration::from_secs(60);
 const REMOTE_SERVER_POLL: Duration = Duration::from_millis(500);
 const REMOTE_SERVER_ROOT: &str = "/home/agent/.vscode-server/cli/servers";
 const REMOTE_MACHINE_SETTINGS: &str = "/home/agent/.vscode-server/data/Machine/settings.json";
+const REMOTE_MACHINE_SETTINGS_DIRECTORY: &str = "/home/agent/.vscode-server/data/Machine";
 const REMOTE_WINDOW_CLOSE_WAIT: Duration = Duration::from_secs(30);
 
 pub(crate) fn check_host() -> Result<(), String> {
@@ -216,6 +217,16 @@ fn remote_window_ids<'a>(listing: &'a str, sandbox_name: &str) -> Vec<&'a str> {
 }
 
 fn configure_terminal_persistence(context: &Context, sandbox_name: &str) -> Result<(), String> {
+    process::run_checked(
+        process::sbx_command(context.preserve_xdg_state).args([
+            "exec",
+            sandbox_name,
+            "mkdir",
+            "-p",
+            REMOTE_MACHINE_SETTINGS_DIRECTORY,
+        ]),
+        "creating the remote VS Code machine-settings directory",
+    )?;
     let existing = sync::remote_file(
         sandbox_name,
         context.preserve_xdg_state,
