@@ -1,5 +1,5 @@
 use crate::environment::Context;
-use crate::{process, sync};
+use crate::{process, sbx, sync};
 use serde_json::{Map, Value};
 use std::env;
 use std::ffi::OsString;
@@ -40,10 +40,7 @@ pub(crate) fn open(
     bootstrap: bool,
 ) -> Result<bool, String> {
     if bootstrap {
-        process::run_checked(
-            process::sbx_command(context.preserve_xdg_state).args(["setup", "ssh"]),
-            "configuring Docker Sandbox SSH",
-        )?;
+        sbx::setup_ssh(context.preserve_xdg_state)?;
     }
     process::run_checked(
         process::code_command(context.preserve_xdg_state).args(remote_open_arguments(
@@ -218,8 +215,7 @@ fn remote_window_ids<'a>(listing: &'a str, sandbox_name: &str) -> Vec<&'a str> {
 
 fn configure_terminal_persistence(context: &Context, sandbox_name: &str) -> Result<(), String> {
     process::run_checked(
-        process::sbx_command(context.preserve_xdg_state).args([
-            "exec",
+        sbx::exec_command(context.preserve_xdg_state).args([
             sandbox_name,
             "mkdir",
             "-p",
@@ -351,8 +347,7 @@ fn wait_for_remote_server(context: &Context, sandbox_name: &str) -> Result<Optio
 }
 
 fn find_remote_server(context: &Context, sandbox_name: &str) -> Result<Option<String>, String> {
-    let output = process::sbx_command(context.preserve_xdg_state)
-        .arg("exec")
+    let output = sbx::exec_command(context.preserve_xdg_state)
         .arg(sandbox_name)
         .arg("--")
         .args([
@@ -384,8 +379,7 @@ fn remote_extension_listing(
     server_cli: &str,
 ) -> Result<String, String> {
     let output = process::output_checked(
-        process::sbx_command(context.preserve_xdg_state).args([
-            "exec",
+        sbx::exec_command(context.preserve_xdg_state).args([
             sandbox_name,
             "--",
             server_cli,
@@ -403,9 +397,8 @@ fn install_extensions(
     server_cli: &str,
     extensions: &[&str],
 ) {
-    let mut command = process::sbx_command(context.preserve_xdg_state);
+    let mut command = sbx::exec_command(context.preserve_xdg_state);
     command
-        .arg("exec")
         .arg(sandbox_name)
         .arg("--")
         .arg(server_cli)

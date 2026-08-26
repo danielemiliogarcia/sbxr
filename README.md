@@ -34,7 +34,7 @@ directory above; an empty directory is initialized with Cargo automatically.
 
 - A host supported by [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/install/),
   with the required virtualization support (KVM on Linux).
-- The Docker Sandboxes `sbx` CLI. Follow Docker's official
+- Docker Sandboxes `sbx` 0.39.0 or newer. Follow Docker's official
   [installation and sign-in guide](https://docs.docker.com/ai/sandboxes/install/).
   Docker Desktop and Docker Engine are not required just to use `sbx`.
 - Rust and Cargo 1.85 or newer to build and install `sbxr` from source.
@@ -78,6 +78,12 @@ no host shell helper and embeds all kit specifications in the executable. The
 declarative kits still contain normal Linux provisioning commands executed
 inside the sandbox.
 
+Sandbox composition is generated as a Docker `.sbxenv.yaml` under protected
+host state, never inside the mounted project. Docker's experimental `sbx env`
+interface owns declarative creation, reuse, and removal; `sbxr` retains stable
+project identity, contract-drift protection, host integration, and native IDE
+orchestration.
+
 ## Commands
 
 | Command | Purpose |
@@ -94,6 +100,7 @@ inside the sandbox.
 | `sbxr auth-status .` | Check Codex, Claude, and Pi provider status |
 | `sbxr audit .` | Run cargo-audit, cargo-deny, and cargo-vet if configured |
 | `sbxr review .` | No-OAuth, clone-mode review sandbox |
+| `sbxr inspect .` | Show the protected environment declaration and contract state |
 | `sbxr name .` | Print the deterministic name |
 | `sbxr status .` | Report whether the project sandbox exists and its state |
 | `sbxr stop .` | Stop while preserving state |
@@ -141,6 +148,13 @@ sandbox. It prints the deterministic name, resolved project path, and
 `running`, `stopped`, or `not found`. Its exit status is `0` when the sandbox
 exists and `1` when it does not, making it suitable for scripts. Like sandbox
 names, the result is preset- and optional-RocksDB-specific.
+
+`sbxr inspect` is also read-only and does not require or start Docker
+Sandboxes. It prints the protected environment path, desired/applied host
+contract state, and YAML for the selected project, preset, and optional
+RocksDB configuration. Before the first sandbox creation it renders a
+prospective declaration in memory without writing it. After materialization it
+shows the authoritative file stored under protected host state.
 
 When the matching Remote-SSH window is open, `sbxr stop` asks that exact VS
 Code window to close normally and waits before stopping the microVM. This gives
@@ -308,9 +322,11 @@ separate kit checkout.
 
 ## Host setup behavior
 
-`sbxr setup` is idempotent. It detects and configures only missing
+`sbxr setup` is idempotent. It requires Docker Sandboxes 0.39.0 or newer,
+detects and configures missing
 interactive prerequisites: Docker sign-in, host-managed OpenAI OAuth for
-presets that use Codex, and the VS Code Remote-SSH extension. Those steps may
+presets that use Codex, Docker-managed `*.sbx` SSH configuration, and the VS
+Code Remote-SSH extension. Those steps may
 open a browser or download the extension. It verifies the result of each
 command and continues far enough to report multiple problems together. It
 never installs system packages or invokes `sudo`; missing `sbx`, VS Code,
@@ -322,6 +338,7 @@ their corresponding state is missing:
 ```bash
 sbx login
 sbx secret set openai --oauth
+sbx setup ssh
 code --install-extension ms-vscode-remote.remote-ssh
 ```
 
@@ -329,6 +346,7 @@ code --install-extension ms-vscode-remote.remote-ssh
 |---|---|
 | `sbx` installed but Docker sign-in or readiness is missing | Runs `sbx login`, then verifies with `sbx ls` |
 | OpenAI OAuth missing for `rust-multi-agent` or `rust-codex` | Runs the browser-based OAuth command, then verifies it |
+| Docker `*.sbx` SSH configuration | Safely reruns `sbx setup ssh` to refresh/verify it |
 | VS Code installed but Remote-SSH missing | Installs the Microsoft extension, then verifies it |
 | `sbx`, VS Code, OpenSSH, or KVM missing | Prints installation guidance and exits non-zero |
 | Git missing | Warns that review mode is unavailable |
@@ -342,7 +360,8 @@ new`/`sbxr vscode` bootstrap and explicit `sbxr update` offer to import it with
 an explicit credential warning; otherwise use Claude's native `/login` flow
 inside the sandbox.
 
-The first `sbxr new .` run creates a deterministic project sandbox,
+The first `sbxr new .` run writes a protected declarative environment outside
+the project, creates a deterministic project sandbox,
 initializes an empty directory with Cargo, configures Git/editor integration,
 mirrors trusted host agent and VS Code integrations, records that bootstrap
 inside the persistent sandbox, and opens VS Code. Later `new` runs skip SSH
@@ -350,8 +369,12 @@ setup, Git integration, agent copying, the VS Code Server wait, and extension
 inventory/install work; they reuse the sandbox and open its existing remote
 project window immediately. Run `sbxr update .` when host Git identity, agent
 plugins/settings/hooks, or VS Code extensions change and should be re-mirrored
-deliberately. An older sandbox without the relevant marker field performs the
-one-time migration after upgrading `sbxr`.
+deliberately. If an older or externally-created same-name sandbox has no
+verifiable environment-contract marker, `sbxr` refuses to reconcile it and
+prints explicit `sbxr rm`/`sbxr new` commands. It never silently destroys or
+adopts that sandbox. The contract covers the rendered environment and the
+contents of every selected local kit, so a kit update also requires explicit
+recreation instead of silently reusing stale provisioning.
 
 With VS Code's persistent-terminal settings enabled (the default), terminal
 tabs and scrollback reconnect or revive when possible. Stopping or removing the
@@ -467,8 +490,11 @@ mirror them from a trusted host profile.
 - `src/cli.rs`: argument parsing, presets, actions, and help text;
 - `src/environment.rs`: runtime context, project identity, sandbox names, and
   optional host RocksDB validation;
-- `src/sandbox.rs`: development/review sandbox lifecycle, remote commands, and
-  Cargo audits;
+- `src/envfile.rs`: protected declarative environments and desired/applied
+  contract state;
+- `src/sbx.rs`: the centralized Docker Sandboxes CLI boundary;
+- `src/sandbox.rs`: development/review orchestration, remote commands, and
+  Cargo audits on top of declarative lifecycle;
 - `src/host.rs`: setup, preflight checks, and diagnostics;
 - `src/auth.rs`: credential-import offer, explicit import, and subscription
   status;
@@ -484,6 +510,7 @@ mirror them from a trusted host profile.
 - `THIRD_PARTY_REVIEW.md`: version/checksum inventory, build-script findings,
   limitations, and the mandatory dependency-update procedure.
 - `ENVIRONMENT.md`: complete optional environment-variable reference.
+- `CHANGELOG.md`: user-visible changes pending and included in releases.
 
 See [SECURITY.md](SECURITY.md) for the threat model and
 [ENVIRONMENT.md](ENVIRONMENT.md) for configuration overrides.
@@ -492,6 +519,10 @@ For operating-system compatibility, host requirements, limitations, and
 validation status, see [PLATFORM_SUPPORT.md](PLATFORM_SUPPORT.md).
 
 ## Limitations
+
+Docker's `.sbxenv.yaml`/`sbx env` interface is experimental in Docker
+Sandboxes 0.39. `sbxr` centralizes that dependency, but a future Docker release
+may require a compatibility update.
 
 After a microVM stop, VS Code Remote-SSH may restore terminal tabs but lose their scrollback due to a VS Code limitation/bug; [details and tested versions](PLATFORM_SUPPORT.md#vscode-state-across-a-microvm-stop).
 

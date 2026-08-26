@@ -12,6 +12,7 @@ over equivalent environment variables.
 | `SBXR_NAME` | Sandbox name | Deterministic name derived from preset, project path, and optional RocksDB prefix |
 | `SBXR_ROOT` | Directory path | Root for materialized embedded kits; see platform defaults below |
 | `SBXR_KIT_ROOT` | Directory path | Uses external kit directories instead of materializing the embedded kits |
+| `SBXR_STATE_ROOT` | Directory path | Protected host root for generated `.sbxenv.yaml` and contract metadata; see platform defaults below |
 | `SBXR_ROCKSDB_HOST` | RocksDB installation prefix | Unset and disabled; overridden by `--rocksdb-host[=PREFIX]` |
 | `SBXR_SYNC_AGENT_CONFIG` | `0` to disable | Trusted-host Codex, Claude, and Pi extension/plugin and configuration mirroring is enabled |
 | `SBXR_SYNC_VSCODE_EXTENSIONS` | `0` to disable | Host VS Code extension mirroring is enabled |
@@ -71,6 +72,28 @@ SBXR_KIT_ROOT=/path/to/kits sbxr doctor
 
 `SBXR_KIT_ROOT` must contain all expected kit subdirectories and their
 `spec.yaml` files.
+
+Declarative environment definitions and desired/applied contract metadata are
+stored separately from kit data:
+
+| Platform | Default protected state root |
+|---|---|
+| Linux and other Unix | `$XDG_STATE_HOME/sbxr`, or `~/.local/state/sbxr` |
+| macOS | `$XDG_STATE_HOME/sbxr`, or `~/Library/Application Support/sbxr/state` |
+| Windows | `%XDG_STATE_HOME%\sbxr`, `%LOCALAPPDATA%\sbxr\state`, or `%USERPROFILE%\.local\state\sbxr` |
+
+Override it only with a trusted path outside every project/additional
+workspace:
+
+```bash
+SBXR_STATE_ROOT=/secure/host/state/sbxr sbxr up .
+```
+
+On Unix, `sbxr` protects directories with mode `0700` and files with `0600`,
+uses atomic replacement, and rejects symlinked authoritative path components
+and files. The
+generated environment contains paths and kit references but no OAuth tokens,
+private keys, literal secrets, or host secret commands.
 
 ## Optional RocksDB acceleration
 
@@ -147,6 +170,10 @@ CLIs. Docker Sandboxes creates Unix sockets below its state directory, and a
 long custom state path can exceed the operating system's Unix-socket length
 limit.
 
+This removal applies only to child CLIs. `sbxr` itself still uses
+`XDG_STATE_HOME/sbxr` for protected declarative state unless
+`SBXR_STATE_ROOT` overrides it.
+
 Only preserve the host value when it is intentionally configured and short:
 
 ```bash
@@ -166,7 +193,7 @@ The launcher also respects standard operating-system variables:
 | `HOME` or `USERPROFILE` | Locates user configuration and authentication files |
 | `XDG_DATA_HOME` | Selects the base data directory when `SBXR_ROOT` is unset |
 | `LOCALAPPDATA` | Windows data-directory fallback |
-| `XDG_STATE_HOME` | Passed to child CLIs only with `SBXR_PRESERVE_XDG_STATE_HOME=1` |
+| `XDG_STATE_HOME` | Selects `sbxr`'s protected state root when `SBXR_STATE_ROOT` is unset; passed to child CLIs only with `SBXR_PRESERVE_XDG_STATE_HOME=1` |
 | `SSH_AUTH_SOCK` | Preferred host SSH agent; if it is unusable, `sbxr` checks standard GCR, GnuPG, and GNOME Keyring sockets for an agent with loaded keys |
 
 The former `RUST_SBXR_*` names are not recognized after the project was renamed

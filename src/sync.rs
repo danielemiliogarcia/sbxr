@@ -1,4 +1,4 @@
-use crate::{process, sha256};
+use crate::{process, sbx, sha256};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::env;
@@ -97,8 +97,7 @@ pub(crate) fn write_bootstrap_state(
     state: BootstrapState,
 ) -> Result<(), String> {
     process::run_checked(
-        process::sbx_command(preserve_xdg_state).args([
-            "exec",
+        sbx::exec_command(preserve_xdg_state).args([
             sandbox_name,
             "mkdir",
             "-p",
@@ -231,8 +230,7 @@ fn mirror_claude_hook_tools(
         return Ok(());
     };
     let host_version = command_version(Command::new(&host_rtk).arg("--version"));
-    let remote_version = command_version(process::sbx_command(preserve_xdg_state).args([
-        "exec",
+    let remote_version = command_version(sbx::exec_command(preserve_xdg_state).args([
         sandbox_name,
         "--",
         REMOTE_RTK,
@@ -245,16 +243,15 @@ fn mirror_claude_hook_tools(
     let contents = fs::read(&host_rtk)
         .map_err(|error| format!("could not read host rtk at {}: {error}", host_rtk.display()))?;
     upload_root_executable(sandbox_name, preserve_xdg_state, REMOTE_RTK, &contents)?;
-    let installed_version = command_version(process::sbx_command(preserve_xdg_state).args([
-        "exec",
+    let installed_version = command_version(sbx::exec_command(preserve_xdg_state).args([
         sandbox_name,
         "--",
         REMOTE_RTK,
         "--version",
     ]));
     if host_version.is_none() || installed_version != host_version {
-        let _ = process::sbx_command(preserve_xdg_state)
-            .args(["exec", "-u", "root", sandbox_name, "rm", "-f", REMOTE_RTK])
+        let _ = sbx::exec_command(preserve_xdg_state)
+            .args(["-u", "root", sandbox_name, "rm", "-f", REMOTE_RTK])
             .status();
     }
     Ok(())
@@ -309,8 +306,8 @@ fn upload_root_executable(
     path: &str,
     contents: &[u8],
 ) -> Result<(), String> {
-    let mut child = process::sbx_command(preserve_xdg_state)
-        .args(["exec", "-u", "root", "-i", sandbox_name, "tee", path])
+    let mut child = sbx::exec_command(preserve_xdg_state)
+        .args(["-u", "root", "-i", sandbox_name, "tee", path])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .spawn()
@@ -330,8 +327,7 @@ fn upload_root_executable(
         ));
     }
     process::run_checked(
-        process::sbx_command(preserve_xdg_state).args([
-            "exec",
+        sbx::exec_command(preserve_xdg_state).args([
             "-u",
             "root",
             sandbox_name,
@@ -362,8 +358,7 @@ fn sync_pi_npm_packages(
         return Ok(());
     }
     process::run_checked(
-        process::sbx_command(preserve_xdg_state).args([
-            "exec",
+        sbx::exec_command(preserve_xdg_state).args([
             sandbox_name,
             "--",
             "npm",
@@ -452,8 +447,7 @@ fn stream_tree(
     home_text: &str,
     selected: &[PathBuf],
 ) -> Result<(), String> {
-    let mut child = process::sbx_command(preserve_xdg_state)
-        .arg("exec")
+    let mut child = sbx::exec_command(preserve_xdg_state)
         .arg("-i")
         .arg(sandbox_name)
         .args(["tar", "-xf", "-", "-C", "/home/agent"])
@@ -725,9 +719,8 @@ fn remote_program_exists(
     preserve_xdg_state: bool,
     program: &str,
 ) -> Result<bool, String> {
-    let status = process::sbx_command(preserve_xdg_state)
+    let status = sbx::exec_command(preserve_xdg_state)
         .args([
-            "exec",
             sandbox_name,
             "--",
             "sh",
@@ -765,8 +758,8 @@ pub(crate) fn remote_file(
     preserve_xdg_state: bool,
     path: &str,
 ) -> Result<Option<Vec<u8>>, String> {
-    let output = process::sbx_command(preserve_xdg_state)
-        .args(["exec", sandbox_name, "cat", path])
+    let output = sbx::exec_command(preserve_xdg_state)
+        .args([sandbox_name, "cat", path])
         .output()
         .map_err(|error| format!("could not read remote {path}: {error}"))?;
     Ok(output.status.success().then_some(output.stdout))
@@ -778,8 +771,8 @@ pub(crate) fn upload_file(
     path: &str,
     contents: &[u8],
 ) -> Result<(), String> {
-    let mut child = process::sbx_command(preserve_xdg_state)
-        .args(["exec", "-i", sandbox_name, "tee", path])
+    let mut child = sbx::exec_command(preserve_xdg_state)
+        .args(["-i", sandbox_name, "tee", path])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .spawn()
@@ -797,7 +790,7 @@ pub(crate) fn upload_file(
         return Err(format!("writing remote {path} failed with {status}"));
     }
     process::run_checked(
-        process::sbx_command(preserve_xdg_state).args(["exec", sandbox_name, "chmod", "600", path]),
+        sbx::exec_command(preserve_xdg_state).args([sandbox_name, "chmod", "600", path]),
         "setting remote configuration permissions",
     )
 }

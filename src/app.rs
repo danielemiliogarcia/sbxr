@@ -1,6 +1,6 @@
 use crate::cli::{self, Action, Cli};
 use crate::environment::{Context, Project, RocksDbHost};
-use crate::{auth, host, process, sandbox, vscode};
+use crate::{auth, envfile, host, process, sandbox, sbx, vscode};
 use std::env;
 use std::path::Path;
 
@@ -26,7 +26,11 @@ pub(crate) fn run() -> Result<i32, String> {
     }
 
     let rocksdb = RocksDbHost::resolve(rocksdb_requested)?;
-    let context = Context::discover()?;
+    let context = if matches!(action, Action::Inspect(_)) {
+        Context::discover_read_only()?
+    } else {
+        Context::discover()?
+    };
     if matches!(action, Action::Doctor) {
         return Ok(if host::doctor(&context, preset, rocksdb.as_ref()) {
             0
@@ -47,11 +51,11 @@ pub(crate) fn run() -> Result<i32, String> {
         }
         Action::Up(_) => {
             sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
-            println!("ready: ssh {}.sbx", project.name);
+            print_ready(&context, &project);
         }
         Action::Shell(_) => {
             sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
-            sandbox::run_remote(&project, &["bash", "-l"])?;
+            sandbox::run_remote(&context, &project, &["bash", "-l"])?;
         }
         Action::Codex(_) => {
             sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
@@ -61,7 +65,7 @@ pub(crate) fn run() -> Result<i32, String> {
                     preset.name()
                 ));
             }
-            sandbox::run_remote(&project, &["codex"])?;
+            sandbox::run_remote(&context, &project, &["codex"])?;
         }
         Action::Claude(_) => {
             sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
@@ -71,7 +75,7 @@ pub(crate) fn run() -> Result<i32, String> {
                     preset.name()
                 ));
             }
-            sandbox::run_remote(&project, &["claude"])?;
+            sandbox::run_remote(&context, &project, &["claude"])?;
         }
         Action::Pi(_) => {
             sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
@@ -81,7 +85,7 @@ pub(crate) fn run() -> Result<i32, String> {
                     preset.name()
                 ));
             }
-            sandbox::run_remote(&project, &["pi"])?;
+            sandbox::run_remote(&context, &project, &["pi"])?;
         }
         Action::AuthImport(_) => {
             auth::import(&context, &project, preset, rocksdb.as_ref())?;
@@ -96,6 +100,15 @@ pub(crate) fn run() -> Result<i32, String> {
             sandbox::ensure_review(&context, &project, rocksdb.as_ref())?;
             vscode::open(&context, &project.review_name, &project.path, false, true)?;
         }
+        Action::Inspect(_) => {
+            let inspection = envfile::inspect(
+                &context,
+                &project,
+                envfile::Kind::Development(preset),
+                rocksdb.as_ref(),
+            )?;
+            inspection.print();
+        }
         Action::Name(_) => println!("{}", project.name),
         Action::Status(_) => {
             return Ok(if sandbox::show_status(&context, &project)? {
@@ -107,12 +120,7 @@ pub(crate) fn run() -> Result<i32, String> {
         Action::Stop(_) => {
             process::require("sbx")?;
             vscode::close_for_stop(&context, &project.name, &project.path)?;
-            process::run_checked(
-                process::sbx_command(context.preserve_xdg_state)
-                    .arg("stop")
-                    .arg(&project.name),
-                "stopping sandbox",
-            )?;
+            sbx::stop(context.preserve_xdg_state, &project.name)?;
         }
         Action::Remove { force, .. } => {
             process::require("sbx")?;
@@ -120,13 +128,15 @@ pub(crate) fn run() -> Result<i32, String> {
                 "Removing sandbox-local state for {}; host project files remain.",
                 project.name
             );
-            let mut command = process::sbx_command(context.preserve_xdg_state);
-            command.arg("rm");
-            if force {
-                command.arg("--force");
-            }
-            command.arg(&project.name);
-            process::run_checked(&mut command, "removing sandbox")?;
+            sbx::require_minimum_version(context.preserve_xdg_state)?;
+            let definition = envfile::materialize(
+                &context,
+                &project,
+                envfile::Kind::Development(preset),
+                rocksdb.as_ref(),
+            )?;
+            sbx::env_remove(context.preserve_xdg_state, definition.path(), force)?;
+            definition.remove_host_state(&context.state_root)?;
         }
         Action::Setup | Action::Doctor | Action::Help => unreachable!(),
     }
@@ -153,5 +163,19 @@ fn open_dev(
         crate::sync::write_bootstrap_state(&project.name, context.preserve_xdg_state, state)?;
         println!("==> sandbox host-integration bootstrap complete");
     }
+    print_ready(context, project);
     Ok(())
+}
+
+fn print_ready(context: &Context, project: &Project) {
+    println!("ready: ssh {}.sbx", project.name);
+    println!(
+        "environment: {}",
+        envfile::development_path(context, project).display()
+    );
+    println!("inspect: sbxr inspect {}", shell_quote_path(&project.path));
+}
+
+fn shell_quote_path(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }

@@ -93,27 +93,12 @@ pub fn install_hint(name: &str) -> &'static str {
     }
 }
 
-pub fn sbx_command(preserve_xdg_state: bool) -> Command {
-    let mut command = Command::new("sbx");
-    apply_ssh_agent(&mut command);
-    if !preserve_xdg_state {
-        command.env_remove("XDG_STATE_HOME");
-    }
-    command
-}
-
 pub fn code_command(preserve_xdg_state: bool) -> Command {
     let mut command = Command::new("code");
     apply_ssh_agent(&mut command);
     if !preserve_xdg_state {
         command.env_remove("XDG_STATE_HOME");
     }
-    command
-}
-
-pub fn ssh_command() -> Command {
-    let mut command = Command::new("ssh");
-    apply_ssh_agent(&mut command);
     command
 }
 
@@ -183,21 +168,5 @@ pub fn output_checked(command: &mut Command, description: &str) -> Result<Output
         } else {
             Err(format!("{description} failed: {stderr}"))
         }
-    }
-}
-
-pub fn shell_quote(value: &OsStr) -> String {
-    let text = value.to_string_lossy();
-    format!("'{}'", text.replace('\'', "'\\''"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn quotes_for_posix_shell() {
-        assert_eq!(shell_quote(OsStr::new("hello world")), "'hello world'");
-        assert_eq!(shell_quote(OsStr::new("it's")), "'it'\\''s'");
     }
 }

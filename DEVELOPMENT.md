@@ -72,9 +72,11 @@ The binary is deliberately split by responsibility:
 | `main.rs` | Minimal process entrypoint and module wiring |
 | `app.rs` | Top-level command dispatch and workflow coordination |
 | `cli.rs` | Argument parsing, presets, actions, and help text |
-| `environment.rs` | Project identity, deterministic names, data paths, and RocksDB validation |
+| `environment.rs` | Project identity, deterministic names, data/state paths, and RocksDB validation |
+| `envfile.rs` | Protected `.sbxenv.yaml` generation, atomic state files, and environment-contract guards |
+| `sbx.rs` | The only Docker Sandboxes CLI construction/version/schema boundary |
 | `git.rs` | Sandbox Git tooling, identity/signing-policy mirroring, GitHub access, and migration |
-| `sandbox.rs` | Sandbox status/lifecycle, review mode, remote commands, and Cargo audits |
+| `sandbox.rs` | Declarative development/review orchestration, remote commands, and Cargo audits |
 | `host.rs` | Setup, action-specific preflight, and `doctor` diagnostics |
 | `auth.rs` | Credential-import offer, explicit import, and subscription status |
 | `vscode.rs` | Remote-SSH launch and VS Code extension mirroring |
@@ -111,8 +113,12 @@ scripts.
    - CLI syntax and preset selection belong in `cli.rs`.
    - Command sequencing belongs in `app.rs`, while the actual operation belongs
      in its domain module.
-   - External commands should use the helpers in `process.rs` so errors and
+   - Docker `sbx` commands must be constructed through `sbx.rs`; generic
+     process/error handling belongs in `process.rs` so SSH-agent and
      `SBXR_PRESERVE_XDG_STATE_HOME` behavior stay consistent.
+   - Authoritative environment definitions must remain under protected host
+     state and outside every primary/additional workspace. Do not execute a
+     project-local `.sbxenv.yaml`.
    - Keep internal APIs `pub(crate)` unless they truly need wider visibility.
    - Gate platform-specific code with `cfg` and avoid assuming UTF-8 filesystem
      paths where the existing code supports native paths.
@@ -126,7 +132,8 @@ scripts.
 5. Update user documentation when commands, environment variables, presets,
    authentication, security properties, or setup behavior change. New
    environment variables must be documented in
-   [ENVIRONMENT.md](ENVIRONMENT.md).
+   [ENVIRONMENT.md](ENVIRONMENT.md); user-visible behavior changes must be
+   recorded under `Unreleased` in [CHANGELOG.md](CHANGELOG.md).
 
 ## Kit changes
 
@@ -193,6 +200,17 @@ Run live checks when changing sandbox lifecycle, kits, host preflight,
 authentication, configuration mirroring, VS Code, process invocation, or
 platform integration.
 
+The declarative refactor was verified against `sbx 0.39.0` on 2026-08-26:
+
+- `sbx env run --detached` created a fresh environment and reconciled a
+  contract-matched existing one without opening an interactive shell;
+- clone mode kept the private clone at the original project path and exposed
+  the host source separately at `/run/sandbox/source` read-only;
+- an `additionalWorkspaces.readOnly: true` RocksDB prefix was readable at its
+  host path and rejected a write probe with `Read-only file system`;
+- the Codex-primary, Claude-primary, and default Codex + Claude + Pi
+  compositions all provisioned successfully.
+
 Start with the read-only host diagnostic:
 
 ```bash
@@ -212,6 +230,12 @@ Confirm the second run reuses the same deterministic sandbox:
 cargo run --frozen -- name /path/to/test-rust-project
 cargo run --frozen -- up /path/to/test-rust-project
 ```
+
+For lifecycle changes, also verify that the generated definition and contract
+metadata are mode `0600` under `0700` directories, that no secret literal is
+present, and that a manually created same-name sandbox is rejected before
+`sbx env run`. Explicit `rm` must remove only the sandbox and its trusted
+per-sandbox host state; the host project must remain.
 
 Check relevant tools and compile without writing `target/` into the mounted
 host project:

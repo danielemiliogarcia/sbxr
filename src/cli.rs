@@ -126,6 +126,7 @@ pub(crate) enum Action {
     AuthStatus(Option<PathBuf>),
     Audit(Option<PathBuf>),
     Review(Option<PathBuf>),
+    Inspect(Option<PathBuf>),
     Name(Option<PathBuf>),
     Status(Option<PathBuf>),
     Stop(Option<PathBuf>),
@@ -174,6 +175,7 @@ impl Action {
             "auth-status" => Self::AuthStatus(path),
             "audit" => Self::Audit(path),
             "review" => Self::Review(path),
+            "inspect" => Self::Inspect(path),
             "name" => Self::Name(path),
             "status" => Self::Status(path),
             "stop" => Self::Stop(path),
@@ -216,6 +218,7 @@ impl Action {
             | Self::AuthStatus(path)
             | Self::Audit(path)
             | Self::Review(path)
+            | Self::Inspect(path)
             | Self::Name(path)
             | Self::Status(path)
             | Self::Stop(path) => path.as_deref(),
@@ -239,7 +242,7 @@ impl Action {
             | Self::Status(_)
             | Self::Stop(_)
             | Self::Remove { .. } => &["sbx"],
-            Self::Name(_) | Self::Setup | Self::Doctor | Self::Help => &[],
+            Self::Inspect(_) | Self::Name(_) | Self::Setup | Self::Doctor | Self::Help => &[],
         }
     }
 
@@ -288,6 +291,7 @@ Usage:
   sbxr auth-status [PATH]  Show subscription login status
   sbxr audit [PATH]        Run cargo-audit, cargo-deny, and cargo-vet
   sbxr review [PATH]       Open a no-OAuth clone-mode review sandbox
+  sbxr inspect [PATH]      Show the protected environment declaration
   sbxr name [PATH]         Print the deterministic sandbox name
   sbxr status [PATH]       Check whether the project sandbox exists
   sbxr stop [PATH]         Stop the project sandbox
@@ -299,7 +303,8 @@ Usage:
 PATH defaults to the current directory. PRESET is rust-multi-agent (default),
 rust-codex, or rust-claude; SBXR_PRESET sets the same default. The generated
 name is preset-specific unless SBXR_NAME overrides it. SBXR_KIT_ROOT
-overrides the vendored kit directory. Set SBXR_SYNC_AGENT_CONFIG=0 or
+overrides the vendored kit directory. SBXR_STATE_ROOT overrides the protected
+host-side environment-definition directory. Set SBXR_SYNC_AGENT_CONFIG=0 or
 SBXR_SYNC_VSCODE_EXTENSIONS=0 to disable the corresponding host mirror.
 --rocksdb-host is opt-in and mounts /opt/rocksdb-10.4.2 read-only; use
 --rocksdb-host=PREFIX or SBXR_ROCKSDB_HOST for another installation."#
@@ -328,6 +333,10 @@ mod tests {
         assert!(matches!(
             Action::parse(vec!["status".into()]).unwrap(),
             Action::Status(None)
+        ));
+        assert!(matches!(
+            Action::parse(vec!["inspect".into(), "/tmp/project".into()]).unwrap(),
+            Action::Inspect(Some(_))
         ));
         assert!(matches!(
             Action::parse(vec!["rm".into(), "--force".into()]).unwrap(),
@@ -388,6 +397,10 @@ mod tests {
         let name = Action::Name(None);
         assert!(name.required_host_commands().is_empty());
         assert!(!name.needs_kvm());
+
+        let inspect = Action::Inspect(None);
+        assert!(inspect.required_host_commands().is_empty());
+        assert!(!inspect.needs_kvm());
 
         let status = Action::Status(None);
         assert_eq!(status.required_host_commands(), ["sbx"]);

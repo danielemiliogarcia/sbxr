@@ -24,7 +24,7 @@ Code connection, and Rust workflow have all been exercised on that host.
 
 Every host needs:
 
-- the Docker Sandboxes `sbx` CLI, signed in with `sbx login`;
+- Docker Sandboxes `sbx` 0.39.0 or newer, signed in with `sbx login`;
 - Rust and Cargo 1.85 or newer to build and install `sbxr`;
 - native VS Code with its `code` launcher on `PATH`;
 - an OpenSSH client and the VS Code Remote-SSH extension;
@@ -106,8 +106,8 @@ brew install docker/tap/sbx
 sbx login
 ```
 
-`sbxr` already selects the normal macOS application-data location, handles
-Unix permissions, and does not run Linux-only KVM checks on macOS. Its embedded
+`sbxr` already selects the normal macOS application-data and protected-state
+locations, handles Unix permissions, and does not run Linux-only KVM checks on macOS. Its embedded
 kits include the ARM64 Linux Rust target used by an Apple-silicon sandbox.
 
 Live macOS validation is still pending. Also ensure that the VS Code `code`

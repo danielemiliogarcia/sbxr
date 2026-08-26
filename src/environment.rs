@@ -9,11 +9,20 @@ use std::os::unix::ffi::OsStrExt;
 
 pub(crate) struct Context {
     pub(crate) kit_root: PathBuf,
+    pub(crate) state_root: PathBuf,
     pub(crate) preserve_xdg_state: bool,
 }
 
 impl Context {
     pub(crate) fn discover() -> Result<Self, String> {
+        Self::discover_with_materialization(true)
+    }
+
+    pub(crate) fn discover_read_only() -> Result<Self, String> {
+        Self::discover_with_materialization(false)
+    }
+
+    fn discover_with_materialization(materialize_kits: bool) -> Result<Self, String> {
         let explicit_kit_root = env::var_os("SBXR_KIT_ROOT").map(PathBuf::from);
         let data_root = env::var_os("SBXR_ROOT")
             .map(PathBuf::from)
@@ -21,13 +30,37 @@ impl Context {
         let kit_root = explicit_kit_root
             .clone()
             .unwrap_or_else(|| data_root.join("kits"));
-        if explicit_kit_root.is_none() {
+        if materialize_kits && explicit_kit_root.is_none() {
             embedded::materialize(&kit_root)?;
         }
+        let state_root = env::var_os("SBXR_STATE_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or(default_state_root()?);
         Ok(Self {
             kit_root,
+            state_root,
             preserve_xdg_state: env::var("SBXR_PRESERVE_XDG_STATE_HOME").as_deref() == Ok("1"),
         })
+    }
+}
+
+fn default_state_root() -> Result<PathBuf, String> {
+    if let Some(root) = env::var_os("XDG_STATE_HOME") {
+        return Ok(PathBuf::from(root).join("sbxr"));
+    }
+    if cfg!(target_os = "windows") {
+        if let Some(root) = env::var_os("LOCALAPPDATA") {
+            return Ok(PathBuf::from(root).join("sbxr").join("state"));
+        }
+    }
+    let home = process::home_dir()?;
+    if cfg!(target_os = "macos") {
+        Ok(home
+            .join("Library/Application Support")
+            .join("sbxr")
+            .join("state"))
+    } else {
+        Ok(home.join(".local/state/sbxr"))
     }
 }
 
@@ -52,7 +85,6 @@ pub(crate) struct RocksDbHost {
     pub(crate) prefix: PathBuf,
     pub(crate) library_dir: String,
     pub(crate) include_dir: String,
-    pub(crate) mount_argument: std::ffi::OsString,
 }
 
 impl RocksDbHost {
@@ -98,7 +130,6 @@ impl RocksDbHost {
         Ok(Some(Self {
             library_dir: format!("{prefix_text}/lib"),
             include_dir: format!("{prefix_text}/include"),
-            mount_argument: format!("{prefix_text}:ro").into(),
             prefix,
         }))
     }

@@ -1,6 +1,6 @@
 use crate::cli::{Action, Preset};
 use crate::environment::{Context, RocksDbHost};
-use crate::{embedded, process};
+use crate::{embedded, envfile, process, sbx};
 use std::fs;
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
@@ -12,7 +12,7 @@ pub(crate) fn setup(preset: Preset, preserve_xdg_state: bool) -> Result<(), Stri
     let mut failures = Vec::new();
 
     if process::command_exists("sbx") {
-        let ready = process::sbx_command(preserve_xdg_state)
+        let ready = sbx::command(preserve_xdg_state)
             .args(["ls", "--json"])
             .output()
             .is_ok_and(|output| output.status.success());
@@ -21,12 +21,12 @@ pub(crate) fn setup(preset: Preset, preserve_xdg_state: bool) -> Result<(), Stri
         } else {
             println!("==> Docker Sandboxes is not ready; starting `sbx login`");
             if let Err(error) = process::run_checked(
-                process::sbx_command(preserve_xdg_state).arg("login"),
+                sbx::command(preserve_xdg_state).arg("login"),
                 "Docker sign-in",
             ) {
                 failures.push(error);
             } else {
-                match process::sbx_command(preserve_xdg_state)
+                match sbx::command(preserve_xdg_state)
                     .args(["ls", "--json"])
                     .output()
                 {
@@ -53,7 +53,7 @@ pub(crate) fn setup(preset: Preset, preserve_xdg_state: bool) -> Result<(), Stri
                 Ok(false) => {
                     println!("==> OpenAI OAuth is missing; starting browser authorization");
                     if let Err(error) = process::run_checked(
-                        process::sbx_command(preserve_xdg_state)
+                        sbx::command(preserve_xdg_state)
                             .args(["secret", "set", "openai", "--oauth"]),
                         "OpenAI OAuth setup",
                     ) {
@@ -69,6 +69,13 @@ pub(crate) fn setup(preset: Preset, preserve_xdg_state: bool) -> Result<(), Stri
                 }
                 Err(error) => failures.push(error),
             }
+        }
+        if let Err(error) = sbx::require_minimum_version(preserve_xdg_state) {
+            failures.push(error);
+        } else if let Err(error) = sbx::setup_ssh(preserve_xdg_state) {
+            failures.push(error);
+        } else {
+            println!("ok   Docker-managed *.sbx SSH configuration");
         }
     } else {
         failures.push(format!("sbx is missing\n{}", process::install_hint("sbx")));
@@ -148,7 +155,7 @@ pub(crate) fn setup(preset: Preset, preserve_xdg_state: bool) -> Result<(), Stri
 
 fn openai_oauth_configured(preserve_xdg_state: bool) -> Result<bool, String> {
     let output = process::output_checked(
-        process::sbx_command(preserve_xdg_state).args(["secret", "ls", "--service", "openai"]),
+        sbx::command(preserve_xdg_state).args(["secret", "ls", "--service", "openai"]),
         "checking OpenAI OAuth",
     )?;
     Ok(String::from_utf8_lossy(&output.stdout).contains("oauth configured"))
@@ -256,26 +263,16 @@ pub(crate) fn doctor(context: &Context, preset: Preset, rocksdb: Option<&RocksDb
         }
     }
 
-    if cfg!(target_os = "linux") {
-        match fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/dev/kvm")
-        {
-            Ok(_) => println!("ok   KVM is accessible"),
-            Err(_) => {
-                println!("FAIL /dev/kvm is not accessible; sbx cannot start microVMs");
-                println!("See: https://docs.docker.com/ai/sandboxes/install/");
-                healthy = false;
-            }
-        }
-    }
     println!("info Docker Engine and Docker Desktop are not required");
     if let Some(rocksdb) = rocksdb {
         println!(
             "ok   host RocksDB prefix {} (read-only opt-in)",
             rocksdb.prefix.display()
         );
+    }
+    if let Err(error) = envfile::validate_state_root(context) {
+        println!("FAIL {error}");
+        healthy = false;
     }
 
     if process::command_exists("code") {
@@ -298,30 +295,28 @@ pub(crate) fn doctor(context: &Context, preset: Preset, rocksdb: Option<&RocksDb
     }
 
     if process::command_exists("sbx") {
-        if process::run_checked(
-            process::sbx_command(context.preserve_xdg_state).arg("version"),
-            "checking sbx version",
-        )
-        .is_err()
-        {
-            healthy = false;
-        }
-        match process::sbx_command(context.preserve_xdg_state)
-            .args(["ls", "--json"])
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                println!("ok   Docker sign-in and sandbox daemon")
+        match sbx::require_minimum_version(context.preserve_xdg_state) {
+            Ok(version) => println!("ok   Docker Sandboxes {version} (minimum 0.39.0)"),
+            Err(error) => {
+                println!("FAIL {error}");
+                healthy = false;
             }
-            _ => {
-                println!(
-                    "FAIL Docker Sandboxes is not ready; run `sbxr setup`, then `sbx diagnose` if needed"
-                );
+        }
+        match sbx::diagnose_json(context.preserve_xdg_state) {
+            Ok(output) => match print_docker_diagnostics(&output.stdout) {
+                Ok(result) => healthy &= result,
+                Err(error) => {
+                    println!("FAIL {error}");
+                    healthy = false;
+                }
+            },
+            Err(error) => {
+                println!("FAIL {error}");
                 healthy = false;
             }
         }
         if preset.has_codex() {
-            match process::sbx_command(context.preserve_xdg_state)
+            match sbx::command(context.preserve_xdg_state)
                 .args(["secret", "ls", "--service", "openai"])
                 .output()
             {
@@ -337,7 +332,7 @@ pub(crate) fn doctor(context: &Context, preset: Preset, rocksdb: Option<&RocksDb
                 }
             }
         }
-        match process::sbx_command(context.preserve_xdg_state)
+        match sbx::command(context.preserve_xdg_state)
             .args(["policy", "ls"])
             .output()
         {
@@ -354,7 +349,7 @@ pub(crate) fn doctor(context: &Context, preset: Preset, rocksdb: Option<&RocksDb
 
         for kit in embedded::KIT_NAMES {
             let path = context.kit_root.join(kit);
-            let status = process::sbx_command(context.preserve_xdg_state)
+            let status = sbx::command(context.preserve_xdg_state)
                 .args(["kit", "validate"])
                 .arg(&path)
                 .stdout(Stdio::null())
@@ -368,4 +363,62 @@ pub(crate) fn doctor(context: &Context, preset: Preset, rocksdb: Option<&RocksDb
         }
     }
     healthy
+}
+
+fn print_docker_diagnostics(json: &[u8]) -> Result<bool, String> {
+    let document: serde_json::Value = serde_json::from_slice(json)
+        .map_err(|error| format!("could not parse `sbx diagnose` JSON: {error}"))?;
+    let checks = document
+        .get("checks")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("`sbx diagnose` JSON has no checks array")?;
+    let mut healthy = true;
+    for check in checks {
+        let name = check
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unnamed check");
+        let status = check
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("fail");
+        let message = check
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("no diagnostic message");
+        let label = match status {
+            "pass" | "skip" => "ok  ",
+            "warn" => "WARN",
+            _ => {
+                healthy = false;
+                "FAIL"
+            }
+        };
+        println!("{label} Docker: {name} — {message}");
+        if status == "fail"
+            && let Some(hint) = check
+                .get("hint")
+                .and_then(serde_json::Value::as_str)
+                .filter(|hint| !hint.is_empty())
+        {
+            println!("     {hint}");
+        }
+    }
+    Ok(healthy)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn docker_diagnostic_failure_changes_health() {
+        let json = br#"{
+          "checks": [
+            {"name":"Daemon", "status":"pass", "message":"healthy"},
+            {"name":"SSH", "status":"fail", "message":"missing", "hint":"run setup"}
+          ]
+        }"#;
+        assert!(!print_docker_diagnostics(json).unwrap());
+    }
 }
