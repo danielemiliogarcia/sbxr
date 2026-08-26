@@ -1,8 +1,12 @@
 use std::env;
 use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::OnceLock;
+
+static SSH_AGENT_SOCKET: OnceLock<Option<OsString>> = OnceLock::new();
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -91,6 +95,7 @@ pub fn install_hint(name: &str) -> &'static str {
 
 pub fn sbx_command(preserve_xdg_state: bool) -> Command {
     let mut command = Command::new("sbx");
+    apply_ssh_agent(&mut command);
     if !preserve_xdg_state {
         command.env_remove("XDG_STATE_HOME");
     }
@@ -99,10 +104,59 @@ pub fn sbx_command(preserve_xdg_state: bool) -> Command {
 
 pub fn code_command(preserve_xdg_state: bool) -> Command {
     let mut command = Command::new("code");
+    apply_ssh_agent(&mut command);
     if !preserve_xdg_state {
         command.env_remove("XDG_STATE_HOME");
     }
     command
+}
+
+pub fn ssh_command() -> Command {
+    let mut command = Command::new("ssh");
+    apply_ssh_agent(&mut command);
+    command
+}
+
+pub fn selected_ssh_agent_socket() -> Option<&'static OsStr> {
+    SSH_AGENT_SOCKET
+        .get_or_init(detect_ssh_agent_socket)
+        .as_deref()
+}
+
+pub fn configured_ssh_agent_socket() -> Option<OsString> {
+    env::var_os("SSH_AUTH_SOCK")
+}
+
+pub fn ssh_agent_has_keys(socket: &OsStr) -> bool {
+    Command::new("ssh-add")
+        .arg("-L")
+        .env("SSH_AUTH_SOCK", socket)
+        .output()
+        .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
+}
+
+fn apply_ssh_agent(command: &mut Command) {
+    if let Some(socket) = selected_ssh_agent_socket() {
+        command.env("SSH_AUTH_SOCK", socket);
+    }
+}
+
+fn detect_ssh_agent_socket() -> Option<OsString> {
+    let mut candidates = Vec::new();
+    if let Some(socket) = configured_ssh_agent_socket() {
+        candidates.push(socket);
+    }
+    if let Some(runtime) = env::var_os("XDG_RUNTIME_DIR") {
+        let runtime = PathBuf::from(runtime);
+        candidates.push(runtime.join("gcr/ssh").into_os_string());
+        candidates.push(runtime.join("gnupg/S.gpg-agent.ssh").into_os_string());
+        candidates.push(runtime.join("keyring/ssh").into_os_string());
+    }
+    candidates.dedup();
+
+    candidates
+        .into_iter()
+        .find(|socket| ssh_agent_has_keys(socket))
 }
 
 pub fn run_checked(command: &mut Command, description: &str) -> Result<(), String> {

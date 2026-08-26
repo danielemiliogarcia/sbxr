@@ -28,6 +28,8 @@ Every host needs:
 - Rust and Cargo 1.85 or newer to build and install `sbxr`;
 - native VS Code with its `code` launcher on `PATH`;
 - an OpenSSH client and the VS Code Remote-SSH extension;
+- an SSH agent with a loaded key for GitHub SSH and, when configured on the
+  host, sandbox SSH signing;
 - Git for `sbxr review`;
 - hardware virtualization supported and enabled.
 
@@ -162,7 +164,9 @@ Before marking another host as tested, verify:
 6. Codex, Claude, and Pi subscription authentication works as documented.
 7. Rust build, test, debugger, source navigation, and Cargo audit workflows run
    inside the sandbox.
-8. Paths containing spaces and non-ASCII characters work correctly.
+8. The forwarded SSH agent supports GitHub authentication and a disposable
+   signed commit without copying private keys into the sandbox.
+9. Paths containing spaces and non-ASCII characters work correctly.
 
 Docker's [editor integration guide](https://docs.docker.com/ai/sandboxes/integrations/)
 describes the platform-specific SSH configuration used by `sbxr`.

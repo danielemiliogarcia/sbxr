@@ -42,6 +42,8 @@ directory above; an empty directory is initialized with Cargo automatically.
 - On Linux/X11, `wmctrl` is recommended so `sbxr stop` can gracefully close
   only the matching Remote-SSH window (`sudo apt-get install wmctrl` on Ubuntu).
 - Git is recommended and is required for `sbxr review`.
+- For GitHub SSH push and sandbox commit signing, load a key in the host SSH
+  agent (`ssh-add -L` must list it). The private key stays on the host.
 - A ChatGPT subscription, Claude subscription, or both, depending on the
   selected preset. Authentication uses the providers' OAuth login flows; API
   keys are not required.
@@ -60,11 +62,14 @@ The default `rust-multi-agent` preset combines:
 
 - Docker's official `codex` agent with host-managed ChatGPT subscription OAuth;
 - pinned Rust tooling, Cargo security tools, and a colored Git-aware Bash
-  prompt;
+  prompt, plus `nano`, Bash/Git completion, and a generated `en_US.UTF-8`
+  locale for clean VS Code terminals;
 - pinned Claude Code with sandbox-local Claude subscription OAuth;
 - pinned Pi, connected to the Docker-managed Codex OAuth proxy and able to
   detect the sandbox-local Claude login;
 - VS Code Remote-SSH, including version-matched host extension installation;
+- GitHub SSH push/pull and host-policy-matched SSH commit signing through
+  Docker's forwarded host SSH agent;
 - trusted-host Codex, Claude, and Pi extension/plugin and configuration
   mirroring, with credentials and runtime state excluded.
 
@@ -96,6 +101,40 @@ inside the sandbox.
 | `sbxr rm --force .` | Remove even while VS Code/SSH is connected |
 | `sbxr setup` | Configure missing Docker login, OpenAI OAuth, and Remote-SSH |
 | `sbxr doctor` | Run the complete read-only host diagnostic |
+
+## Git inside or outside the sandbox
+
+In the default direct mode, the host and sandbox see the same working tree and
+the same `.git` directory. You may inspect, stage, commit, and push from either
+side; do not run competing Git mutations on both sides at the same time.
+
+On first bootstrap, `sbxr` installs `nano` as Git's editor, enables Bash/Git
+completion, mirrors the host's global `user.name` and `user.email`, installs
+GitHub's published SSH host keys, and permits GitHub SSH traffic. Docker
+Sandboxes automatically forwards signing and authentication requests to the
+host agent, so private SSH keys are not copied into the microVM. See Docker's
+[Git sandbox workflow and signing
+model](https://docs.docker.com/ai/sandboxes/workflows/git/).
+If the host's `SSH_AUTH_SOCK` is stale, `sbxr` automatically selects a live
+standard desktop agent with loaded keys (such as GCR or GnuPG) before starting
+Docker Sandboxes; `sbxr doctor` reports when this fallback is active.
+
+`sbxr` mirrors the host project's effective `commit.gpgSign` and `tag.gpgSign`
+defaults and `gpg.format`, including global settings and repository overrides.
+Host SSH signing remains enabled and uses the forwarded SSH agent. When host
+signing is disabled, it remains disabled. When the host requires OpenPGP/GPG
+(including a YubiKey) or S/MIME signing, `sbxr` warns during bootstrap and
+disables automatic sandbox signing because Docker cannot forward those
+signers; ordinary commits made inside that sandbox are unsigned and must be
+signed or re-signed on the host before pushing. An explicit `git commit -S`
+still requests the mirrored format and fails when its signer is unavailable.
+Register an SSH public key with GitHub as a signing key when using SSH signing
+and GitHub's **Verified** badge is required.
+
+Only GitHub SSH is allowed by the bundled policy. Other Git hosts need their
+own reviewed network/known-host kit. Any process in a connected sandbox can ask
+the forwarded SSH agent to authenticate or sign while that connection is
+alive; use an agent that confirms operations when this matters.
 
 `sbxr status` defaults to the current directory and never creates or starts a
 sandbox. It prints the deterministic name, resolved project path, and
@@ -153,6 +192,9 @@ That ready-to-code experience includes:
   definition, and source navigation across the project and available imported
   crate sources;
 - an immediately familiar colored Bash prompt with the current Git branch;
+- `nano` as a working Git editor, Bash/Git completion, mirrored Git author
+  identity and signing defaults, GitHub push/pull through the host SSH agent,
+  and SSH signatures when requested by that policy or `-S`;
 - installed Codex, Claude, and Pi extensions/plugins plus instructions, skills,
   hooks, prompts, themes, and status-line customizations mirrored from the
   trusted host profile;
@@ -290,6 +332,7 @@ code --install-extension ms-vscode-remote.remote-ssh
 | VS Code installed but Remote-SSH missing | Installs the Microsoft extension, then verifies it |
 | `sbx`, VS Code, OpenSSH, or KVM missing | Prints installation guidance and exits non-zero |
 | Git missing | Warns that review mode is unavailable |
+| SSH agent has no loaded key | `doctor` warns that sandbox GitHub authentication/signing will be unavailable |
 | Everything already configured | Reports success without changing anything |
 
 Use `sbxr --preset rust-claude setup` when configuring a Claude-only
@@ -300,14 +343,15 @@ an explicit credential warning; otherwise use Claude's native `/login` flow
 inside the sandbox.
 
 The first `sbxr new .` run creates a deterministic project sandbox,
-initializes an empty directory with Cargo, mirrors trusted host agent and VS
-Code integrations, records that bootstrap inside the persistent sandbox, and
-opens VS Code. Later `new` runs skip SSH setup, agent copying, the VS Code
-Server wait, and extension inventory/install work; they reuse the sandbox and
-open its existing remote project window immediately. Run `sbxr update .` when
-host agent plugins, settings, hooks, or VS Code extensions change and should be
-re-mirrored deliberately. An older sandbox without the marker performs one
-bootstrap after upgrading `sbxr`.
+initializes an empty directory with Cargo, configures Git/editor integration,
+mirrors trusted host agent and VS Code integrations, records that bootstrap
+inside the persistent sandbox, and opens VS Code. Later `new` runs skip SSH
+setup, Git integration, agent copying, the VS Code Server wait, and extension
+inventory/install work; they reuse the sandbox and open its existing remote
+project window immediately. Run `sbxr update .` when host Git identity, agent
+plugins/settings/hooks, or VS Code extensions change and should be re-mirrored
+deliberately. An older sandbox without the relevant marker field performs the
+one-time migration after upgrading `sbxr`.
 
 With VS Code's persistent-terminal settings enabled (the default), terminal
 tabs and scrollback reconnect or revive when possible. Stopping or removing the
@@ -450,3 +494,7 @@ validation status, see [PLATFORM_SUPPORT.md](PLATFORM_SUPPORT.md).
 ## Limitations
 
 After a microVM stop, VS Code Remote-SSH may restore terminal tabs but lose their scrollback due to a VS Code limitation/bug; [details and tested versions](PLATFORM_SUPPORT.md#vscode-state-across-a-microvm-stop).
+
+Docker Sandboxes forwards SSH agents, but not OpenPGP/GPG, YubiKey GPG, or S/MIME signers. `sbxr` warns and disables automatic sandbox signing for those host configurations, so commits made in the sandbox are unsigned and must be signed or re-signed on the host.
+
+Docker Sandboxes 0.39 introduced experimental Linux USB passthrough, which could make direct YubiKey GPG signing inside a microVM possible in the future. `sbxr` does not enable it: passing the whole USB device into an agent-controlled VM expands the trust boundary, may temporarily remove it from the host, and requires additional GnuPG, smart-card, and pinentry setup. Track the feature in Docker's [Sandbox release notes](https://docs.docker.com/ai/sandboxes/release-notes/); host-side signing remains the supported workflow.

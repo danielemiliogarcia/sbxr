@@ -52,14 +52,19 @@ setup:
           cmake \
           curl \
           git \
+          bash-completion \
           libclang-dev \
           libssl-dev \
           lldb \
+          locales \
+          nano \
           pkg-config \
           xz-utils
+        sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
+        locale-gen en_US.UTF-8
         rm -rf /var/lib/apt/lists/*
       user: "0"
-      description: Install native Rust build and LLDB prerequisites
+      description: Install native Rust build, LLDB, and UTF-8 locale prerequisites
 
     - command: |
         set -euo pipefail
@@ -203,9 +208,16 @@ setup:
             '[ -f "$HOME/.config/sbxr/bash-prompt.bash" ] && . "$HOME/.config/sbxr/bash-prompt.bash"' \
             >> /home/agent/.bashrc
         fi
+        if ! grep -Fq '/usr/share/bash-completion/bash_completion' /home/agent/.bashrc; then
+          printf '%s\n' \
+            '' \
+            '# sbxr Bash and Git completion' \
+            '[ -r /usr/share/bash-completion/bash_completion ] && . /usr/share/bash-completion/bash_completion' \
+            >> /home/agent/.bashrc
+        fi
         chown -R agent:agent /home/agent/.config/sbxr /home/agent/.bashrc
       user: "0"
-      description: Install a colored interactive Bash prompt with Git branch
+      description: Install a colored prompt and Bash/Git completion
 
 volumes:
   - path: /home/agent/.cargo/registry

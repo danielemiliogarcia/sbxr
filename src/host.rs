@@ -237,6 +237,25 @@ pub(crate) fn doctor(context: &Context, preset: Preset, rocksdb: Option<&RocksDb
         }
     }
 
+    if process::command_exists("ssh") {
+        match process::selected_ssh_agent_socket() {
+            Some(socket) if process::ssh_agent_has_keys(socket) => {
+                println!(
+                    "ok   host SSH agent has a key for Git authentication and SSH-format signing"
+                );
+                if process::configured_ssh_agent_socket().as_deref() != Some(socket) {
+                    println!(
+                        "info selected live SSH agent {}; configured SSH_AUTH_SOCK is unavailable",
+                        std::path::Path::new(socket).display()
+                    );
+                }
+            }
+            _ => println!(
+                "WARN no usable host SSH agent key; run `ssh-add -L`, load a key with `ssh-add` if needed, then retry"
+            ),
+        }
+    }
+
     if cfg!(target_os = "linux") {
         match fs::OpenOptions::new()
             .read(true)

@@ -3,6 +3,7 @@ mod auth;
 mod cli;
 mod embedded;
 mod environment;
+mod git;
 mod host;
 mod process;
 mod sandbox;

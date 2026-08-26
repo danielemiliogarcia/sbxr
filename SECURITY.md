@@ -21,6 +21,10 @@ not certify dependencies, extensions, or agent output as safe.
   addresses the bootstrap chicken-and-egg problem: installing the isolation
   launcher does not first fetch a newly resolved dependency graph.
 - Official Codex keeps the real ChatGPT OAuth token outside the VM.
+- GitHub authentication and enabled or explicitly requested SSH signing use
+  Docker's forwarded host SSH agent; private SSH keys are not copied into the
+  VM. Automatic commit/tag signing follows the host project's effective Git
+  defaults only when its signing format is SSH.
 - Safe config mirroring excludes credential, history, session, log, project
   trust, and runtime-state files.
 
@@ -31,6 +35,12 @@ not certify dependencies, extensions, or agent output as safe.
 - Allowed registries, GitHub, agent, npm, and VS Code hosts remain reachable;
   hostname allowlisting cannot validate every object served by them.
 - Direct mode lets sandbox code modify the selected project and `.git`.
+- While an SSH/Remote-SSH connection is active, any sandbox process can ask the
+  forwarded host SSH agent to authenticate or sign. Agent confirmation and
+  least-privilege Git keys remain important.
+- Docker does not forward OpenPGP/GPG, YubiKey GPG, or S/MIME signers. When the
+  host requires one, `sbxr` warns and disables automatic sandbox signing;
+  sandbox commits are unsigned and must be signed or re-signed on the host.
 - Normal development windows disable VS Code Workspace Trust for that session
   because the microVM is the execution boundary; clone-mode `review` windows
   retain Workspace Trust.
@@ -77,8 +87,9 @@ not certify dependencies, extensions, or agent output as safe.
 5. Maintain cargo-vet policy for critical repositories and consider registry
    allowlists, dependency cooling periods, and signed internal artifacts.
 6. Use `sbxr review` before building an unknown repository.
-7. Keep SSH keys, Cargo publish tokens, cloud credentials, and production
-   secrets out of project sandboxes.
+7. Keep private SSH-key files, Cargo publish tokens, cloud credentials, and
+   production secrets out of project sandboxes; prefer Docker's host-side
+   credential and SSH-agent forwarding mechanisms.
 8. Import Claude OAuth only into trusted sandboxes, and avoid concurrent
    Claude/Pi credential refresh.
 9. Inspect blocked egress with `sbx policy log "$(sbxr name)"`.

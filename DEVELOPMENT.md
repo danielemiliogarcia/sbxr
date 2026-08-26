@@ -73,6 +73,7 @@ The binary is deliberately split by responsibility:
 | `app.rs` | Top-level command dispatch and workflow coordination |
 | `cli.rs` | Argument parsing, presets, actions, and help text |
 | `environment.rs` | Project identity, deterministic names, data paths, and RocksDB validation |
+| `git.rs` | Sandbox Git tooling, identity/signing-policy mirroring, GitHub access, and migration |
 | `sandbox.rs` | Sandbox status/lifecycle, review mode, remote commands, and Cargo audits |
 | `host.rs` | Setup, action-specific preflight, and `doctor` diagnostics |
 | `auth.rs` | Credential-import offer, explicit import, and subscription status |
@@ -138,6 +139,8 @@ Validate affected kits with the installed Docker Sandboxes CLI:
 ```bash
 sbx kit validate kits/rust
 sbx kit validate kits/claude-cli
+sbx kit validate kits/git-ssh-sign
+sbx kit validate kits/github-ssh
 ```
 
 Run validation for every changed kit. A syntax-valid kit can still fail during
@@ -252,12 +255,20 @@ the SSH window's installed extensions. Do not use `code --remote NAME
 report the local inventory for that form. The development window must not show
 a Workspace Trust prompt, while `sbxr review` must retain Workspace Trust.
 For bootstrap changes, exercise three distinct runs: the first `sbxr new` must
-mirror agent integrations, wait for the VS Code Server, install/verify remote
-extensions, and write `/home/agent/.local/state/sbxr/bootstrap-v1.json`; the
+ensure the UTF-8 locale, configure Git integration, mirror agent integrations,
+wait for the VS Code
+Server, install/verify remote extensions, and write
+`/home/agent/.local/state/sbxr/bootstrap-v1.json`; the
 second `sbxr new` must open VS Code without any of that bootstrap output; and
 `sbxr update` must force both agent and VS Code work again and restore both
 completion flags. Repeat the fast-path check once with a stopped sandbox so the
 marker lookup also proves that it starts the sandbox correctly.
+For Git integration changes, verify `ssh-add -L` inside `sbxr shell`, an
+authenticated `ssh -T git@github.com`, lazy-loaded Bash completion, editor
+launch, and a signed disposable commit. Never use the real working tree merely
+to test commit signing. Also test with `SSH_AUTH_SOCK` pointing at a stale
+socket while a standard desktop agent socket is live; `sbxr doctor` must name
+the selected fallback without printing public-key material.
 Close the window with multiple terminal tabs open, run `sbxr new` again, and
 verify VS Code restores the remote window and its persistent terminal state.
 Then run `sbxr stop` while the remote window is open: only that window should

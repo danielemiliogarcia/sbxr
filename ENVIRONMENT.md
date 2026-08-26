@@ -167,6 +167,7 @@ The launcher also respects standard operating-system variables:
 | `XDG_DATA_HOME` | Selects the base data directory when `SBXR_ROOT` is unset |
 | `LOCALAPPDATA` | Windows data-directory fallback |
 | `XDG_STATE_HOME` | Passed to child CLIs only with `SBXR_PRESERVE_XDG_STATE_HOME=1` |
+| `SSH_AUTH_SOCK` | Preferred host SSH agent; if it is unusable, `sbxr` checks standard GCR, GnuPG, and GNOME Keyring sockets for an agent with loaded keys |
 
 The former `RUST_SBXR_*` names are not recognized after the project was renamed
 to `sbxr`; update shell profiles and automation to use `SBXR_*`.

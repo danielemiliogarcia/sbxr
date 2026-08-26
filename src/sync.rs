@@ -59,6 +59,8 @@ const BOOTSTRAP_STATE_DIRECTORY: &str = "/home/agent/.local/state/sbxr";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct BootstrapState {
+    pub(crate) locale: bool,
+    pub(crate) git: bool,
     pub(crate) agent: bool,
     pub(crate) vscode: bool,
 }
@@ -76,6 +78,11 @@ pub(crate) fn bootstrap_state(
 fn parse_bootstrap_state(bytes: &[u8]) -> BootstrapState {
     let value: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
     BootstrapState {
+        locale: value
+            .get("locale")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        git: value.get("git").and_then(Value::as_bool).unwrap_or(false),
         agent: value.get("agent").and_then(Value::as_bool).unwrap_or(false),
         vscode: value
             .get("vscode")
@@ -110,6 +117,8 @@ pub(crate) fn write_bootstrap_state(
 
 fn serialize_bootstrap_state(state: BootstrapState) -> Result<Vec<u8>, String> {
     serde_json::to_vec_pretty(&serde_json::json!({
+        "locale": state.locale,
+        "git": state.git,
         "agent": state.agent,
         "vscode": state.vscode,
     }))
@@ -949,6 +958,8 @@ mod tests {
     #[test]
     fn round_trips_versioned_bootstrap_state() {
         let state = BootstrapState {
+            locale: true,
+            git: true,
             agent: true,
             vscode: false,
         };
@@ -957,6 +968,8 @@ mod tests {
         assert_eq!(
             parse_bootstrap_state(br#"{"agent":true}"#),
             BootstrapState {
+                locale: false,
+                git: false,
                 agent: true,
                 vscode: false,
             }

@@ -1,6 +1,6 @@
 use crate::cli::Preset;
 use crate::environment::{Context, Project, RocksDbHost, crate_name};
-use crate::{embedded, process, sync};
+use crate::{embedded, git, process, sync};
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
@@ -85,6 +85,12 @@ pub(crate) fn ensure_dev(
         let mut command = process::sbx_command(context.preserve_xdg_state);
         command.arg("create").arg("--name").arg(&project.name);
         command.arg("--kit").arg(context.kit_root.join("rust"));
+        command
+            .arg("--kit")
+            .arg(context.kit_root.join("git-ssh-sign"));
+        command
+            .arg("--kit")
+            .arg(context.kit_root.join("github-ssh"));
         if preset == Preset::MultiAgent {
             command
                 .arg("--kit")
@@ -108,12 +114,55 @@ pub(crate) fn ensure_dev(
         state = sync::BootstrapState::default();
         sync::write_bootstrap_state(&project.name, context.preserve_xdg_state, state)?;
     }
+    if !state.locale {
+        println!("==> ensuring the en_US.UTF-8 locale for VS Code terminals");
+        ensure_utf8_locale(context, &project.name)?;
+        state.locale = true;
+        sync::write_bootstrap_state(&project.name, context.preserve_xdg_state, state)?;
+    }
+    if !state.git {
+        println!("==> configuring editor, Git completion, identity, SSH push, and commit signing");
+        git::configure(context, &project.name, &project.path)?;
+        state.git = true;
+        sync::write_bootstrap_state(&project.name, context.preserve_xdg_state, state)?;
+    }
     if !state.agent {
         sync_agent_capabilities(context, project, preset)?;
         state.agent = true;
         sync::write_bootstrap_state(&project.name, context.preserve_xdg_state, state)?;
     }
     Ok(state)
+}
+
+fn ensure_utf8_locale(context: &Context, sandbox_name: &str) -> Result<(), String> {
+    let script = r#"
+set -euo pipefail
+if locale -a | tr '[:upper:]' '[:lower:]' | grep -qx 'en_us.utf8'; then
+  exit 0
+fi
+export DEBIAN_FRONTEND=noninteractive
+attempt=0
+until sudo apt-get update; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 30 ]; then
+    echo "apt-get update remained unavailable after 60 seconds" >&2
+    exit 1
+  fi
+  sleep 2
+done
+sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends locales
+sudo sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
+sudo locale-gen en_US.UTF-8
+locale -a | tr '[:upper:]' '[:lower:]' | grep -qx 'en_us.utf8'
+"#;
+    process::run_checked(
+        process::sbx_command(context.preserve_xdg_state)
+            .arg("exec")
+            .arg(sandbox_name)
+            .arg("--")
+            .args(["bash", "-lc", script]),
+        "installing the sandbox UTF-8 locale",
+    )
 }
 
 fn append_rocksdb_create_options(
@@ -244,7 +293,8 @@ pub(crate) fn run_remote(project: &Project, program: &[&str]) -> Result<(), Stri
         remote.push_str(&process::shell_quote(OsStr::new(argument)));
     }
     process::run_checked(
-        Command::new("ssh")
+        process::ssh_command()
+            .arg("-A")
             .arg("-t")
             .arg(format!("{}.sbx", project.name))
             .arg(remote),

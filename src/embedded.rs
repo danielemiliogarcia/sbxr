@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-const KITS: [(&str, &str); 6] = [
+const KITS: [(&str, &str); 8] = [
     ("rust", include_str!("../kits/rust/spec.yaml")),
     ("codex-cli", include_str!("../kits/codex-cli/spec.yaml")),
     ("claude-cli", include_str!("../kits/claude-cli/spec.yaml")),
@@ -14,15 +14,22 @@ const KITS: [(&str, &str); 6] = [
         "vscode-remote",
         include_str!("../kits/vscode-remote/spec.yaml"),
     ),
+    (
+        "git-ssh-sign",
+        include_str!("../kits/git-ssh-sign/spec.yaml"),
+    ),
+    ("github-ssh", include_str!("../kits/github-ssh/spec.yaml")),
 ];
 
-pub(crate) const KIT_NAMES: [&str; 6] = [
+pub(crate) const KIT_NAMES: [&str; 8] = [
     "rust",
     "codex-cli",
     "claude-cli",
     "pi-cli",
     "rocksdb-host",
     "vscode-remote",
+    "git-ssh-sign",
+    "github-ssh",
 ];
 
 pub fn materialize(kit_root: &Path) -> Result<(), String> {
