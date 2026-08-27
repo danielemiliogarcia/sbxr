@@ -12,6 +12,13 @@ not certify dependencies, extensions, or agent output as safe.
   outbound hosts.
 - Review mode mounts a clone rather than a writable host checkout, provides no
   agent OAuth, and does not mirror the host VS Code extension set.
+- Authoritative `.sbxenv.yaml` files live in protected host state outside every
+  mounted workspace. On Unix their directories/files use `0700`/`0600`, writes
+  are atomic, and symlinked authoritative path components/files are rejected.
+- Desired/applied contract markers prevent Docker from silently reusing a
+  legacy or externally recreated same-name sandbox with stale creation-time
+  workspaces, kits, ports, or options. The hash includes the generated
+  environment and every selected embedded kit specification.
 - Toolchains and agents are pinned; available bootstrap artifacts are checksum
   verified.
 - The launcher's only direct crate dependency is exact-pinned. Its complete
@@ -35,6 +42,10 @@ not certify dependencies, extensions, or agent output as safe.
 - Allowed registries, GitHub, agent, npm, and VS Code hosts remain reachable;
   hostname allowlisting cannot validate every object served by them.
 - Direct mode lets sandbox code modify the selected project and `.git`.
+- Sandbox-local caches, agent history/login state, tool installations, and
+  remote-editor state are disposable. `sbxr` never silently recreates a
+  mismatched sandbox, but explicit `rm`/recreation permanently discards them;
+  the host project remains the durable source of truth.
 - While an SSH/Remote-SSH connection is active, any sandbox process can ask the
   forwarded host SSH agent to authenticate or sign. Agent confirmation and
   least-privilege Git keys remain important.
@@ -69,8 +80,8 @@ not certify dependencies, extensions, or agent output as safe.
 - Vendoring prevents source drift and network fetching, but reviewed vendored
   code still executes during compilation. Checksums establish identity, not
   benign behavior.
-- `sbxr setup` intentionally invokes Docker browser OAuth and may download
-  Microsoft's Remote-SSH extension into the host VS Code profile. It never
+- `sbxr setup` intentionally invokes Docker browser OAuth and `sbx setup ssh`,
+  and may download Microsoft's Remote-SSH extension into the host VS Code profile. It never
   invokes `sudo` or installs operating-system packages; run it only from a
   reviewed launcher binary.
 - Pi's documented third-party Claude OAuth route may consume separately billed

@@ -76,6 +76,16 @@ pub fn digest(input: &[u8]) -> [u8; 32] {
     output
 }
 
+pub fn hex(input: &[u8]) -> String {
+    let digest = digest(input);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write;
+        write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    output
+}
+
 pub fn hex_prefix(input: &[u8], bytes: usize) -> String {
     digest(input)
         .iter()
@@ -90,6 +100,10 @@ mod tests {
 
     #[test]
     fn known_vectors() {
+        assert_eq!(
+            hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
         assert_eq!(
             hex_prefix(b"", 32),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"

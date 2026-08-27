@@ -1,6 +1,6 @@
 use crate::cli::Preset;
 use crate::environment::{Context, Project, RocksDbHost};
-use crate::{process, sandbox};
+use crate::{process, sandbox, sbx};
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
@@ -79,9 +79,8 @@ fn host_claude_auth_file() -> Result<PathBuf, String> {
 }
 
 fn sandbox_has_claude_auth(context: &Context, sandbox_name: &str) -> Result<bool, String> {
-    let status = process::sbx_command(context.preserve_xdg_state)
+    let status = sbx::exec_command(context.preserve_xdg_state)
         .args([
-            "exec",
             sandbox_name,
             "--",
             "test",
@@ -132,8 +131,7 @@ fn import_file(
     fs::File::open(source)
         .and_then(|mut file| file.read_to_end(&mut bytes))
         .map_err(|error| format!("could not read {}: {error}", source.display()))?;
-    let mut child = process::sbx_command(context.preserve_xdg_state)
-        .arg("exec")
+    let mut child = sbx::exec_command(context.preserve_xdg_state)
         .arg(sandbox_name)
         .arg("--")
         .args(["sh", "-c", script])
@@ -159,29 +157,20 @@ fn import_file(
 pub(crate) fn show_status(context: &Context, sandbox_name: &str, preset: Preset) {
     if preset.has_codex() {
         println!("Codex (Docker host-managed OAuth):");
-        let _ = process::sbx_command(context.preserve_xdg_state)
+        let _ = sbx::command(context.preserve_xdg_state)
             .args(["secret", "ls", "--service", "openai"])
             .status();
     }
     if preset.has_claude() {
         println!("Claude (sandbox-local subscription OAuth):");
-        let _ = process::sbx_command(context.preserve_xdg_state)
-            .args([
-                "exec",
-                sandbox_name,
-                "--",
-                "claude",
-                "auth",
-                "status",
-                "--text",
-            ])
+        let _ = sbx::exec_command(context.preserve_xdg_state)
+            .args([sandbox_name, "--", "claude", "auth", "status", "--text"])
             .status();
     }
     if preset == Preset::MultiAgent {
         println!("Pi via Docker-managed Codex OAuth:");
-        let _ = process::sbx_command(context.preserve_xdg_state)
+        let _ = sbx::exec_command(context.preserve_xdg_state)
             .args([
-                "exec",
                 sandbox_name,
                 "--",
                 "pi",
@@ -193,9 +182,8 @@ pub(crate) fn show_status(context: &Context, sandbox_name: &str, preset: Preset)
             ])
             .status();
         println!("Pi via detected sandbox-local Claude OAuth:");
-        let _ = process::sbx_command(context.preserve_xdg_state)
+        let _ = sbx::exec_command(context.preserve_xdg_state)
             .args([
-                "exec",
                 sandbox_name,
                 "--",
                 "pi",

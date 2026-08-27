@@ -1,5 +1,5 @@
 use crate::environment::Context;
-use crate::{process, sync};
+use crate::{process, sbx, sync};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -47,7 +47,7 @@ pub(crate) fn configure(
 
 fn ensure_github_policy(context: &Context, sandbox_name: &str) -> Result<(), String> {
     process::run_checked(
-        process::sbx_command(context.preserve_xdg_state).args([
+        sbx::command(context.preserve_xdg_state).args([
             "policy",
             "allow",
             "network",
@@ -62,8 +62,7 @@ fn ensure_github_policy(context: &Context, sandbox_name: &str) -> Result<(), Str
 fn install_sandbox_git_integration(context: &Context, sandbox_name: &str) -> Result<(), String> {
     let signing_command = "/home/agent/.config/git/ssh-signing-key-command";
     process::run_checked(
-        process::sbx_command(context.preserve_xdg_state).args([
-            "exec",
+        sbx::exec_command(context.preserve_xdg_state).args([
             sandbox_name,
             "mkdir",
             "-p",
@@ -85,8 +84,7 @@ fn install_sandbox_git_integration(context: &Context, sandbox_name: &str) -> Res
         GITHUB_KNOWN_HOSTS.as_bytes(),
     )?;
     process::run_checked(
-        process::sbx_command(context.preserve_xdg_state).args([
-            "exec",
+        sbx::exec_command(context.preserve_xdg_state).args([
             sandbox_name,
             "chmod",
             "755",
@@ -144,8 +142,7 @@ if ! grep -Fq '/usr/share/bash-completion/bash_completion' "$HOME/.bashrc"; then
 fi
 "#;
     process::run_checked(
-        process::sbx_command(context.preserve_xdg_state)
-            .arg("exec")
+        sbx::exec_command(context.preserve_xdg_state)
             .arg(sandbox_name)
             .arg("--")
             .args(["bash", "-lc", script]),
@@ -161,8 +158,7 @@ fn mirror_host_git_settings(
     for key in ["user.name", "user.email", "init.defaultBranch"] {
         if let Some(value) = host_global_git_value(key)? {
             process::run_checked(
-                process::sbx_command(context.preserve_xdg_state).args([
-                    "exec",
+                sbx::exec_command(context.preserve_xdg_state).args([
                     sandbox_name,
                     "git",
                     "config",
@@ -182,8 +178,7 @@ fn mirror_host_git_settings(
     let ssh_signing = signing_format_is_forwardable(&signing_format);
 
     process::run_checked(
-        process::sbx_command(context.preserve_xdg_state).args([
-            "exec",
+        sbx::exec_command(context.preserve_xdg_state).args([
             sandbox_name,
             "git",
             "config",
@@ -196,8 +191,7 @@ fn mirror_host_git_settings(
 
     if ssh_signing {
         process::run_checked(
-            process::sbx_command(context.preserve_xdg_state).args([
-                "exec",
+            sbx::exec_command(context.preserve_xdg_state).args([
                 sandbox_name,
                 "--",
                 "sh",
@@ -208,8 +202,7 @@ fn mirror_host_git_settings(
         )?;
     } else if let Some(signing_key) = host_git_value(project, "user.signingKey")? {
         process::run_checked(
-            process::sbx_command(context.preserve_xdg_state).args([
-                "exec",
+            sbx::exec_command(context.preserve_xdg_state).args([
                 sandbox_name,
                 "git",
                 "config",
@@ -226,8 +219,7 @@ fn mirror_host_git_settings(
         ("tag.gpgSign", tag_signing && ssh_signing),
     ] {
         process::run_checked(
-            process::sbx_command(context.preserve_xdg_state).args([
-                "exec",
+            sbx::exec_command(context.preserve_xdg_state).args([
                 sandbox_name,
                 "git",
                 "config",

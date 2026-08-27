@@ -1,9 +1,8 @@
 use std::fs;
 use std::path::Path;
 
-const KITS: [(&str, &str); 8] = [
+const KITS: [(&str, &str); 7] = [
     ("rust", include_str!("../kits/rust/spec.yaml")),
-    ("codex-cli", include_str!("../kits/codex-cli/spec.yaml")),
     ("claude-cli", include_str!("../kits/claude-cli/spec.yaml")),
     ("pi-cli", include_str!("../kits/pi-cli/spec.yaml")),
     (
@@ -21,9 +20,8 @@ const KITS: [(&str, &str); 8] = [
     ("github-ssh", include_str!("../kits/github-ssh/spec.yaml")),
 ];
 
-pub(crate) const KIT_NAMES: [&str; 8] = [
+pub(crate) const KIT_NAMES: [&str; 7] = [
     "rust",
-    "codex-cli",
     "claude-cli",
     "pi-cli",
     "rocksdb-host",
