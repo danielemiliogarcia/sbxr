@@ -459,12 +459,14 @@ fn render(
 fn selected_kits(context: &Context, kind: Kind, rocksdb: bool) -> Vec<PathBuf> {
     let mut kits = vec![context.kit_root.join("rust")];
     if let Kind::Development(preset) = kind {
+        kits.push(context.kit_root.join("host-shell"));
         kits.push(context.kit_root.join("git-ssh-sign"));
         kits.push(context.kit_root.join("github-ssh"));
         if preset == Preset::MultiAgent {
             kits.push(context.kit_root.join("claude-cli"));
             kits.push(context.kit_root.join("pi-cli"));
         }
+        kits.push(context.kit_root.join("paseo-cli"));
     }
     if rocksdb {
         kits.push(context.kit_root.join("rocksdb-host"));
@@ -796,7 +798,14 @@ mod tests {
             std::process::id(),
             TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
-        for kit in ["rust", "git-ssh-sign", "github-ssh", "vscode-remote"] {
+        for kit in [
+            "rust",
+            "host-shell",
+            "git-ssh-sign",
+            "github-ssh",
+            "paseo-cli",
+            "vscode-remote",
+        ] {
             let directory = root.join("kits").join(kit);
             fs::create_dir_all(&directory).unwrap();
             fs::write(directory.join("spec.yaml"), format!("name: {kit}\n")).unwrap();
@@ -909,7 +918,14 @@ mod tests {
         ));
         let workspace = root.join("workspace");
         fs::create_dir_all(&workspace).unwrap();
-        for kit in ["rust", "git-ssh-sign", "github-ssh", "vscode-remote"] {
+        for kit in [
+            "rust",
+            "host-shell",
+            "git-ssh-sign",
+            "github-ssh",
+            "paseo-cli",
+            "vscode-remote",
+        ] {
             let directory = root.join("kits").join(kit);
             fs::create_dir_all(&directory).unwrap();
             fs::write(directory.join("spec.yaml"), format!("name: {kit}\n")).unwrap();
@@ -984,7 +1000,14 @@ mod tests {
         ));
         let workspace = root.join("workspace");
         fs::create_dir_all(&workspace).unwrap();
-        for kit in ["rust", "git-ssh-sign", "github-ssh", "vscode-remote"] {
+        for kit in [
+            "rust",
+            "host-shell",
+            "git-ssh-sign",
+            "github-ssh",
+            "paseo-cli",
+            "vscode-remote",
+        ] {
             let directory = root.join("kits").join(kit);
             fs::create_dir_all(&directory).unwrap();
             fs::write(directory.join("spec.yaml"), format!("name: {kit}\n")).unwrap();

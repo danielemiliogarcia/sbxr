@@ -87,6 +87,14 @@ pub(crate) fn run() -> Result<i32, String> {
             }
             sandbox::run_remote(&context, &project, &["pi"])?;
         }
+        Action::Paseo(_) => {
+            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
+            let endpoint = sandbox::paseo_endpoint(&context, &project)?;
+            println!("{endpoint}");
+            println!(
+                "connect a host Paseo client with:\n  paseo --host {endpoint} ls\nor paste that URL into the Paseo app as a remote daemon."
+            );
+        }
         Action::AuthImport(_) => {
             auth::import(&context, &project, preset, rocksdb.as_ref())?;
         }

@@ -1,7 +1,7 @@
 schemaVersion: "2"
 kind: mixin
 name: pi-cli
-version: "0.84.2"
+version: "0.84.4"
 displayName: Pi coding agent CLI
 description: Adds pinned Pi with native subscription OAuth and Docker-managed Codex OAuth detection.
 sourceURL: https://github.com/earendil-works/pi
@@ -37,8 +37,8 @@ setup:
         set -euo pipefail
         if [ -n "${HTTP_PROXY:-}" ]; then npm config set proxy "$HTTP_PROXY"; fi
         if [ -n "${HTTPS_PROXY:-}" ]; then npm config set https-proxy "$HTTPS_PROXY"; fi
-        if ! pi --version 2>/dev/null | grep -Fq '0.84.2'; then
-          npm install -g --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent@0.84.2
+        if ! pi --version 2>/dev/null | grep -Fq '0.84.4'; then
+          npm install -g --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent@0.84.4
         fi
         pi --version
       user: "1000"

@@ -85,12 +85,29 @@ pub(crate) fn ensure_dev(
         state.git = true;
         sync::write_bootstrap_state(&project.name, context.preserve_xdg_state, state)?;
     }
+    if !state.shell {
+        sync_host_shell(context, project)?;
+        state.shell = true;
+        sync::write_bootstrap_state(&project.name, context.preserve_xdg_state, state)?;
+    }
     if !state.agent {
         sync_agent_capabilities(context, project, preset)?;
         state.agent = true;
         sync::write_bootstrap_state(&project.name, context.preserve_xdg_state, state)?;
     }
     Ok(state)
+}
+
+fn sync_host_shell(context: &Context, project: &Project) -> Result<(), String> {
+    if env::var("SBXR_SYNC_HOST_SHELL").as_deref() == Ok("0") {
+        println!("note: host shell-environment mirroring is disabled");
+        return Ok(());
+    }
+    println!(
+        "==> mirroring trusted host Bash aliases and ~/bin utilities into {}",
+        project.name
+    );
+    sync::host_shell(&project.name, context.preserve_xdg_state)
 }
 
 fn ensure_utf8_locale(context: &Context, sandbox_name: &str) -> Result<(), String> {
@@ -207,6 +224,75 @@ fn maybe_initialize_empty_project(context: &Context, project: &Project) -> Resul
         .arg(&project.path)
         .arg(crate_name);
     process::run_checked(&mut command, "initializing Cargo project")
+}
+
+/// Starts the sandbox-local Paseo daemon when it is not already running and
+/// returns the SSH transport URL a host Paseo client connects to.
+pub(crate) fn paseo_endpoint(context: &Context, project: &Project) -> Result<String, String> {
+    if paseo_status(context, &project.name)?.is_none() {
+        println!("==> starting the sandbox-local Paseo daemon");
+        process::run_checked(
+            sbx::exec_command(context.preserve_xdg_state)
+                .arg(&project.name)
+                .arg("--")
+                .args(["bash", "-lc", "paseo start"]),
+            "starting the sandbox Paseo daemon",
+        )?;
+    }
+    let listen = paseo_status(context, &project.name)?
+        .ok_or("the sandbox Paseo daemon did not report a running state")?;
+    let port = listen.rsplit(':').next().unwrap_or("6767").to_owned();
+    let user = remote_user(context, &project.name)?;
+    let mut endpoint = format!("ssh://{user}@{}.sbx", project.name);
+    if port != "6767" {
+        endpoint.push_str(&format!("?daemonPort={port}"));
+    }
+    Ok(endpoint)
+}
+
+/// Returns the daemon's listen address while it is running, or `None`.
+fn paseo_status(context: &Context, sandbox_name: &str) -> Result<Option<String>, String> {
+    let output = sbx::exec_command(context.preserve_xdg_state)
+        .arg(sandbox_name)
+        .arg("--")
+        .args(["bash", "-lc", "paseo status --json"])
+        .output()
+        .map_err(|error| format!("could not query the sandbox Paseo daemon: {error}"))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let document: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(document) => document,
+        Err(_) => return Ok(None),
+    };
+    if document.get("localDaemon").and_then(|value| value.as_str()) != Some("running") {
+        return Ok(None);
+    }
+    Ok(Some(
+        document
+            .get("listen")
+            .and_then(|value| value.as_str())
+            .unwrap_or("127.0.0.1:6767")
+            .to_owned(),
+    ))
+}
+
+fn remote_user(context: &Context, sandbox_name: &str) -> Result<String, String> {
+    let output = process::output_checked(
+        sbx::exec_command(context.preserve_xdg_state)
+            .arg(sandbox_name)
+            .arg("--")
+            .args(["id", "-un"]),
+        "resolving the sandbox user",
+    )?;
+    let user = String::from_utf8(output.stdout)
+        .map_err(|error| format!("the sandbox user name is not UTF-8: {error}"))?
+        .trim()
+        .to_owned();
+    if user.is_empty() {
+        return Err("the sandbox reported an empty user name".to_owned());
+    }
+    Ok(user)
 }
 
 pub(crate) fn run_remote(

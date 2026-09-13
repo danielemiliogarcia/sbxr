@@ -122,6 +122,7 @@ pub(crate) enum Action {
     Codex(Option<PathBuf>),
     Claude(Option<PathBuf>),
     Pi(Option<PathBuf>),
+    Paseo(Option<PathBuf>),
     AuthImport(Option<PathBuf>),
     AuthStatus(Option<PathBuf>),
     Audit(Option<PathBuf>),
@@ -171,6 +172,7 @@ impl Action {
             "codex" => Self::Codex(path),
             "claude" => Self::Claude(path),
             "pi" => Self::Pi(path),
+            "paseo" => Self::Paseo(path),
             "auth-import" => Self::AuthImport(path),
             "auth-status" => Self::AuthStatus(path),
             "audit" => Self::Audit(path),
@@ -214,6 +216,7 @@ impl Action {
             | Self::Codex(path)
             | Self::Claude(path)
             | Self::Pi(path)
+            | Self::Paseo(path)
             | Self::AuthImport(path)
             | Self::AuthStatus(path)
             | Self::Audit(path)
@@ -236,6 +239,7 @@ impl Action {
             | Self::Codex(_)
             | Self::Claude(_)
             | Self::Pi(_)
+            | Self::Paseo(_)
             | Self::AuthImport(_)
             | Self::AuthStatus(_)
             | Self::Audit(_)
@@ -264,6 +268,7 @@ impl Action {
                 | Self::Codex(_)
                 | Self::Claude(_)
                 | Self::Pi(_)
+                | Self::Paseo(_)
                 | Self::AuthImport(_)
                 | Self::AuthStatus(_)
                 | Self::Audit(_)
@@ -287,6 +292,7 @@ Usage:
   sbxr codex [PATH]        Run Codex with a ChatGPT subscription
   sbxr claude [PATH]       Run Claude Code with a Claude subscription
   sbxr pi [PATH]           Run Pi with detected Codex/Claude subscriptions
+  sbxr paseo [PATH]        Start the sandbox Paseo daemon and print its SSH URL
   sbxr auth-import [PATH]  Explicitly import trusted host OAuth caches
   sbxr auth-status [PATH]  Show subscription login status
   sbxr audit [PATH]        Run cargo-audit, cargo-deny, and cargo-vet

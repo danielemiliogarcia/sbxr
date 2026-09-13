@@ -1,0 +1,71 @@
+schemaVersion: "2"
+kind: mixin
+name: paseo-cli
+version: "0.8.0"
+displayName: Paseo agent-control daemon
+description: Adds the pinned Paseo CLI and a local-only daemon that Paseo clients reach over the sandbox SSH transport.
+sourceURL: https://www.npmjs.com/package/@getpaseo/cli
+
+security:
+  privileged: false
+
+permissions:
+  network:
+    allow:
+      - registry.npmjs.org:443
+
+environment:
+  variables:
+    PASEO_HOME: /home/agent/.paseo
+
+setup:
+  install:
+    - command: |
+        set -euo pipefail
+        mkdir -p /home/agent/.paseo
+        chown -R agent:agent /home/agent/.paseo
+      user: "0"
+      description: Make the persistent Paseo state volume agent-owned
+
+    - command: |
+        set -euo pipefail
+        if [ -n "${HTTP_PROXY:-}" ]; then npm config set proxy "$HTTP_PROXY"; fi
+        if [ -n "${HTTPS_PROXY:-}" ]; then npm config set https-proxy "$HTTPS_PROXY"; fi
+        if ! paseo --version 2>/dev/null | grep -Fq '0.8.0'; then
+          npm install -g --ignore-scripts --no-audit --no-fund @getpaseo/cli@0.8.0
+        fi
+        paseo --version
+      user: "1000"
+      description: Install the pinned Paseo CLI without lifecycle scripts
+
+    - command: |
+        set -euo pipefail
+        mkdir -p /home/agent/.paseo
+        if [ ! -f /home/agent/.paseo/config.json ]; then
+          cat > /home/agent/.paseo/config.json <<'PASEO_CONFIG'
+        {
+          "version": 1,
+          "daemon": {
+            "listen": "127.0.0.1:6767",
+            "relay": {
+              "enabled": false
+            },
+            "cors": {
+              "allowedOrigins": [
+                "https://app.paseo.sh"
+              ]
+            }
+          },
+          "app": {
+            "baseUrl": "https://app.paseo.sh"
+          }
+        }
+        PASEO_CONFIG
+          chmod 0600 /home/agent/.paseo/config.json
+        fi
+      user: "1000"
+      description: Bind the daemon to the sandbox loopback interface and disable the external relay
+
+volumes:
+  - path: /home/agent/.paseo
+    size: 4g

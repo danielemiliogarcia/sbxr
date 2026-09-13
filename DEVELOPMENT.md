@@ -145,7 +145,10 @@ Validate affected kits with the installed Docker Sandboxes CLI:
 
 ```bash
 sbx kit validate kits/rust
+sbx kit validate kits/host-shell
 sbx kit validate kits/claude-cli
+sbx kit validate kits/pi-cli
+sbx kit validate kits/paseo-cli
 sbx kit validate kits/git-ssh-sign
 sbx kit validate kits/github-ssh
 ```

@@ -48,12 +48,16 @@ const PI_PATHS: &[&str] = &[
     ".pi/agent/prompts",
     ".pi/agent/themes",
     ".pi/agent/npm/package.json",
-    ".pi/agent/npm/package-lock.json",
 ];
 
 const PI_EXTENSION_PATHS: &[&str] = &[".pi/agent/extensions"];
+
+const HOST_SHELL_PATHS: &[&str] = &[".bash_aliases", "bin"];
+const HOST_ALIASES_PATH: &str = "/home/agent/.config/sbxr/host-aliases.bash";
+
 const REMOTE_RTK: &str = "/usr/local/bin/rtk";
-const PI_NPM_LOCK_MARKER: &str = "/home/agent/.pi/agent/npm/.sbxr-lock-sha256";
+const PI_NPM_MANIFEST_MARKER: &str = "/home/agent/.pi/agent/npm/.sbxr-manifest-sha256";
+const PI_NPM_ROOT: &str = "/home/agent/.pi/agent/npm";
 const BOOTSTRAP_STATE_PATH: &str = "/home/agent/.local/state/sbxr/bootstrap-v1.json";
 const BOOTSTRAP_STATE_DIRECTORY: &str = "/home/agent/.local/state/sbxr";
 
@@ -61,6 +65,7 @@ const BOOTSTRAP_STATE_DIRECTORY: &str = "/home/agent/.local/state/sbxr";
 pub(crate) struct BootstrapState {
     pub(crate) locale: bool,
     pub(crate) git: bool,
+    pub(crate) shell: bool,
     pub(crate) agent: bool,
     pub(crate) vscode: bool,
 }
@@ -83,6 +88,7 @@ fn parse_bootstrap_state(bytes: &[u8]) -> BootstrapState {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         git: value.get("git").and_then(Value::as_bool).unwrap_or(false),
+        shell: value.get("shell").and_then(Value::as_bool).unwrap_or(false),
         agent: value.get("agent").and_then(Value::as_bool).unwrap_or(false),
         vscode: value
             .get("vscode")
@@ -118,6 +124,7 @@ fn serialize_bootstrap_state(state: BootstrapState) -> Result<Vec<u8>, String> {
     serde_json::to_vec_pretty(&serde_json::json!({
         "locale": state.locale,
         "git": state.git,
+        "shell": state.shell,
         "agent": state.agent,
         "vscode": state.vscode,
     }))
@@ -344,40 +351,115 @@ fn sync_pi_npm_packages(
     preserve_xdg_state: bool,
     home: &Path,
 ) -> Result<(), String> {
-    let lock_path = home.join(".pi/agent/npm/package-lock.json");
     let package_path = home.join(".pi/agent/npm/package.json");
-    if !lock_path.is_file() || !package_path.is_file() {
+    if !package_path.is_file() {
         return Ok(());
     }
-    let lock = fs::read(&lock_path)
-        .map_err(|error| format!("could not read {}: {error}", lock_path.display()))?;
-    let wanted = sha256::hex_prefix(&lock, 32);
-    let current = remote_file(sandbox_name, preserve_xdg_state, PI_NPM_LOCK_MARKER)?
+    let package = fs::read(&package_path)
+        .map_err(|error| format!("could not read {}: {error}", package_path.display()))?;
+    let wanted = sha256::hex_prefix(&package, 32);
+    let current = remote_file(sandbox_name, preserve_xdg_state, PI_NPM_MANIFEST_MARKER)?
         .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned());
     if current.as_deref() == Some(&wanted) {
         return Ok(());
     }
+    // The host lockfile pins extension builds against the host's own Pi release.
+    // The sandbox runs its kit-pinned Pi, so those exact versions can reference
+    // APIs that release no longer exports and every `pi` start then fails to load
+    // the extension. Resolve the host's declared semver ranges against the
+    // sandbox Pi instead, and drop any lockfile left by an earlier sbxr version.
+    process::run_checked(
+        sbx::exec_command(preserve_xdg_state).args([
+            sandbox_name,
+            "--",
+            "rm",
+            "-f",
+            "/home/agent/.pi/agent/npm/package-lock.json",
+        ]),
+        "clearing the stale sandbox Pi extension lockfile",
+    )?;
     process::run_checked(
         sbx::exec_command(preserve_xdg_state).args([
             sandbox_name,
             "--",
             "npm",
-            "ci",
+            "install",
             "--legacy-peer-deps",
             "--ignore-scripts",
             "--no-audit",
             "--no-fund",
             "--prefix",
-            "/home/agent/.pi/agent/npm",
+            PI_NPM_ROOT,
         ]),
-        "installing exact host Pi extension packages",
+        "installing host-declared Pi extension packages",
     )?;
     upload_file(
         sandbox_name,
         preserve_xdg_state,
-        PI_NPM_LOCK_MARKER,
+        PI_NPM_MANIFEST_MARKER,
         wanted.as_bytes(),
     )
+}
+
+pub(crate) fn host_shell(sandbox_name: &str, preserve_xdg_state: bool) -> Result<(), String> {
+    let home = process::home_dir()?;
+    let home_text = home.to_string_lossy();
+    let selected: Vec<PathBuf> = existing(&home, HOST_SHELL_PATHS).collect();
+    if !selected.is_empty() {
+        stream_tree(
+            sandbox_name,
+            preserve_xdg_state,
+            &home,
+            &home_text,
+            &selected,
+        )?;
+    }
+    mirror_host_bashrc_aliases(sandbox_name, preserve_xdg_state, &home, &home_text)
+}
+
+/// Copies the alias definitions out of the host `.bashrc` without adopting the
+/// rest of it: the surrounding file configures host toolchains, host paths, and
+/// host-only integrations that do not belong in a sandbox.
+fn mirror_host_bashrc_aliases(
+    sandbox_name: &str,
+    preserve_xdg_state: bool,
+    home: &Path,
+    home_text: &str,
+) -> Result<(), String> {
+    let bashrc = home.join(".bashrc");
+    if !bashrc.is_file() {
+        return Ok(());
+    }
+    let contents = fs::read_to_string(&bashrc)
+        .map_err(|error| format!("could not read {}: {error}", bashrc.display()))?;
+    let aliases = bashrc_alias_lines(&contents).replace(home_text, "/home/agent");
+    if aliases.is_empty() {
+        return Ok(());
+    }
+    let file = format!(
+        "# Managed by sbxr: alias definitions mirrored from the host ~/.bashrc.\n{aliases}"
+    );
+    upload_file(
+        sandbox_name,
+        preserve_xdg_state,
+        HOST_ALIASES_PATH,
+        file.as_bytes(),
+    )
+}
+
+fn bashrc_alias_lines(contents: &str) -> String {
+    let mut output = String::new();
+    let mut continued = false;
+    for line in contents.lines() {
+        let starts_alias = line.trim_start().starts_with("alias ");
+        if !continued && !starts_alias {
+            continue;
+        }
+        output.push_str(line);
+        output.push('\n');
+        continued = line.ends_with('\\');
+    }
+    output
 }
 
 fn existing(home: &Path, paths: &'static [&'static str]) -> impl Iterator<Item = PathBuf> {
@@ -461,7 +543,7 @@ fn stream_tree(
             .ok_or("remote capability extraction stdin was unavailable")?;
         let mut archive = TarWriter::new(output);
         for relative in selected {
-            archive.append(&home.join(relative), relative, home_text)?;
+            archive.append_tree(&home.join(relative), relative, home_text)?;
         }
         archive.finish()?;
     }
@@ -795,24 +877,61 @@ pub(crate) fn upload_file(
     )
 }
 
+const MAX_SYMLINK_DEREFERENCE_DEPTH: u32 = 32;
+
 struct TarWriter<'a, W: Write> {
     output: &'a mut W,
+    root: PathBuf,
 }
 
 impl<'a, W: Write> TarWriter<'a, W> {
     fn new(output: &'a mut W) -> Self {
-        Self { output }
+        Self {
+            output,
+            root: PathBuf::new(),
+        }
     }
 
-    fn append(&mut self, source: &Path, archive: &Path, host_home: &str) -> Result<(), String> {
+    /// Appends one mirrored top-level selection. Symlinks are preserved only
+    /// while they resolve inside this selection; the sandbox has no copy of
+    /// anything outside it, so those links are followed instead.
+    fn append_tree(
+        &mut self,
+        source: &Path,
+        archive: &Path,
+        host_home: &str,
+    ) -> Result<(), String> {
+        self.root = fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
+        self.append(source, archive, host_home, 0)
+    }
+
+    fn append(
+        &mut self,
+        source: &Path,
+        archive: &Path,
+        host_home: &str,
+        depth: u32,
+    ) -> Result<(), String> {
         let metadata = fs::symlink_metadata(source)
             .map_err(|error| format!("could not inspect {}: {error}", source.display()))?;
         if should_skip(archive) {
             return Ok(());
         }
         if metadata.file_type().is_symlink() {
-            if fs::metadata(source).is_err() {
+            let Ok(resolved) = fs::canonicalize(source) else {
+                // The host link is already broken; there is nothing to mirror.
                 return Ok(());
+            };
+            if !resolved.starts_with(&self.root) {
+                // A link that leaves this mirrored tree has no valid sandbox-side
+                // target, so copy what it points at under the link's own name.
+                if depth >= MAX_SYMLINK_DEREFERENCE_DEPTH {
+                    return Err(format!(
+                        "refusing to follow deeply nested mirrored symlinks at {}",
+                        source.display()
+                    ));
+                }
+                return self.append(&resolved, archive, host_home, depth + 1);
             }
             let target = fs::read_link(source)
                 .map_err(|error| format!("could not read symlink {}: {error}", source.display()))?;
@@ -826,7 +945,12 @@ impl<'a, W: Write> TarWriter<'a, W> {
                 .collect();
             entries.sort_by_key(|entry| entry.file_name());
             for entry in entries {
-                self.append(&entry.path(), &archive.join(entry.file_name()), host_home)?;
+                self.append(
+                    &entry.path(),
+                    &archive.join(entry.file_name()),
+                    host_home,
+                    depth,
+                )?;
             }
         } else if metadata.is_file() {
             let mut contents = Vec::new();
@@ -903,6 +1027,8 @@ fn should_skip(path: &Path) -> bool {
     let text = path.to_string_lossy().replace('\\', "/");
     text == ".codex/skills/.system"
         || text.starts_with(".codex/skills/.system/")
+        || text == "bin/.git"
+        || text.starts_with("bin/.git/")
         || text.contains("/.remote-plugin-install-staging")
 }
 
@@ -948,11 +1074,90 @@ fn mode(metadata: &fs::Metadata) -> u64 {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn dereferences_mirrored_links_that_leave_their_tree() {
+        use std::os::unix::fs::symlink;
+
+        let root =
+            std::env::temp_dir().join(format!("sbxr-sync-symlink-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let tree = root.join("tree");
+        fs::create_dir_all(&tree).unwrap();
+        fs::write(root.join("outside.txt"), b"outside payload").unwrap();
+        fs::write(tree.join("real.txt"), b"inside payload").unwrap();
+        symlink("real.txt", tree.join("inside-link")).unwrap();
+        symlink(root.join("outside.txt"), tree.join("escaping-link")).unwrap();
+        symlink(root.join("missing.txt"), tree.join("broken-link")).unwrap();
+
+        let mut buffer = Vec::new();
+        {
+            let mut archive = TarWriter::new(&mut buffer);
+            archive
+                .append_tree(&tree, Path::new("tree"), &root.to_string_lossy())
+                .unwrap();
+            archive.finish().unwrap();
+        }
+        let _ = fs::remove_dir_all(&root);
+
+        let mut entries = HashMap::new();
+        let mut offset = 0;
+        while offset + 512 <= buffer.len() {
+            let header = &buffer[offset..offset + 512];
+            let name = String::from_utf8_lossy(&header[0..100])
+                .trim_end_matches('\0')
+                .to_owned();
+            if name.is_empty() {
+                break;
+            }
+            let size = usize::from_str_radix(
+                String::from_utf8_lossy(&header[124..135])
+                    .trim_end_matches('\0')
+                    .trim(),
+                8,
+            )
+            .unwrap();
+            entries.insert(name, header[156]);
+            offset += 512 + size.div_ceil(512) * 512;
+        }
+
+        // A link that stays inside the mirrored tree still resolves in the sandbox.
+        assert_eq!(entries.get("tree/inside-link"), Some(&b'2'));
+        // One that escapes it does not, so its content is copied under the link name.
+        assert_eq!(entries.get("tree/escaping-link"), Some(&b'0'));
+        // A link the host itself cannot resolve is skipped entirely.
+        assert_eq!(entries.get("tree/broken-link"), None);
+    }
+
+    #[test]
+    fn keeps_only_alias_definitions_from_the_host_bashrc() {
+        let bashrc = concat!(
+            "export PATH=$PATH:/host/only/bin\n",
+            "# some more ls aliases\n",
+            "alias ll='ls -alF'\n",
+            "  alias grep='grep --color=auto'\n",
+            "alias wrapped='echo one \\\n",
+            "  two'\n",
+            "source /host/only/tool.sh\n",
+        );
+        assert_eq!(
+            bashrc_alias_lines(bashrc),
+            concat!(
+                "alias ll='ls -alF'\n",
+                "  alias grep='grep --color=auto'\n",
+                "alias wrapped='echo one \\\n",
+                "  two'\n",
+            )
+        );
+        assert!(bashrc_alias_lines("export PATH=/host\n").is_empty());
+    }
+
     #[test]
     fn round_trips_versioned_bootstrap_state() {
         let state = BootstrapState {
             locale: true,
             git: true,
+            shell: true,
             agent: true,
             vscode: false,
         };
@@ -963,6 +1168,7 @@ mod tests {
             BootstrapState {
                 locale: false,
                 git: false,
+                shell: false,
                 agent: true,
                 vscode: false,
             }

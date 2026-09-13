@@ -1,0 +1,51 @@
+schemaVersion: "2"
+kind: mixin
+name: host-shell
+version: "1"
+displayName: Host shell environment hook
+description: Sources mirrored host Bash aliases and puts the mirrored host ~/bin utilities on PATH.
+sourceURL: https://github.com/danielemiliogarcia/sbxr
+
+security:
+  privileged: false
+
+setup:
+  install:
+    - command: |
+        set -euo pipefail
+        mkdir -p /home/agent/.config/sbxr
+        cat > /home/agent/.config/sbxr/host-shell.bash <<'SBXR_HOST_SHELL'
+        # Managed by sbxr. This file is safe to source more than once.
+        # sbxr mirrors the trusted host ~/.bash_aliases and ~/bin into the sandbox
+        # during bootstrap; this hook only wires them into interactive shells.
+
+        # Append, not prepend: sandbox-managed toolchains keep priority over
+        # mirrored host utilities of the same name.
+        if [ -d "$HOME/bin" ]; then
+          case ":$PATH:" in
+            *":$HOME/bin:"*) ;;
+            *) PATH="$PATH:$HOME/bin"; export PATH ;;
+          esac
+        fi
+
+        # The host .bashrc itself is not adopted; sbxr extracts only its alias
+        # definitions into this file during bootstrap.
+        if [ -f "$HOME/.config/sbxr/host-aliases.bash" ]; then
+          . "$HOME/.config/sbxr/host-aliases.bash" || true
+        fi
+
+        if [ -f "$HOME/.bash_aliases" ]; then
+          . "$HOME/.bash_aliases" || true
+        fi
+        SBXR_HOST_SHELL
+        touch /home/agent/.bashrc
+        if ! grep -Fq '.config/sbxr/host-shell.bash' /home/agent/.bashrc; then
+          printf '%s\n' \
+            '' \
+            '# sbxr mirrored host shell environment' \
+            '[ -f "$HOME/.config/sbxr/host-shell.bash" ] && . "$HOME/.config/sbxr/host-shell.bash"' \
+            >> /home/agent/.bashrc
+        fi
+        chown -R agent:agent /home/agent/.config/sbxr /home/agent/.bashrc
+      user: "0"
+      description: Source mirrored host aliases and add the mirrored host ~/bin to PATH

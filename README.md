@@ -67,11 +67,15 @@ The default `rust-multi-agent` preset combines:
 - pinned Claude Code with sandbox-local Claude subscription OAuth;
 - pinned Pi, connected to the Docker-managed Codex OAuth proxy and able to
   detect the sandbox-local Claude login;
+- the pinned Paseo CLI and a loopback-only Paseo daemon that host Paseo clients
+  reach over the sandbox SSH transport;
 - VS Code Remote-SSH, including version-matched host extension installation;
 - GitHub SSH push/pull and host-policy-matched SSH commit signing through
   Docker's forwarded host SSH agent;
 - trusted-host Codex, Claude, and Pi extension/plugin and configuration
-  mirroring, with credentials and runtime state excluded.
+  mirroring, with credentials and runtime state excluded;
+- the host's Bash aliases and `~/bin` utilities mirrored into the sandbox and
+  placed on `PATH`.
 
 The host launcher and its configuration-copy implementation are Rust. It ships
 no host shell helper and embeds all kit specifications in the executable. The
@@ -96,6 +100,7 @@ orchestration.
 | `sbxr codex .` | Run Codex |
 | `sbxr claude .` | Run Claude Code |
 | `sbxr pi .` | Run Pi in the multi-agent preset |
+| `sbxr paseo .` | Start the sandbox Paseo daemon and print its SSH URL |
 | `sbxr auth-import .` | Explicitly import a trusted host Claude cache |
 | `sbxr auth-status .` | Check Codex, Claude, and Pi provider status |
 | `sbxr audit .` | Run cargo-audit, cargo-deny, and cargo-vet if configured |
@@ -173,6 +178,33 @@ on the installed VS Code/Remote-SSH release; see
 No custom environment variables are required. Optional preset, naming,
 storage, mirroring, RocksDB, and authentication-import overrides are documented
 in [ENVIRONMENT.md](ENVIRONMENT.md).
+
+## Driving sandbox agents with Paseo
+
+Every development sandbox installs the pinned Paseo CLI and a daemon bound to
+the sandbox's own loopback interface. The daemon's external relay is disabled,
+so it is reachable only through the sandbox SSH transport that Docker Sandboxes
+already provides:
+
+```bash
+sbxr paseo .
+# ssh://agent@rust-multi-my-project-1a2b3c4d.sbx
+```
+
+`sbxr paseo` creates or reuses the project sandbox, starts the daemon when it is
+not already running, and prints that URL. Pass it to a host Paseo client, or
+paste it into the Paseo app as a remote daemon:
+
+```bash
+paseo --host ssh://agent@rust-multi-my-project-1a2b3c4d.sbx ls
+```
+
+The client opens `ssh -W 127.0.0.1:6767` to the sandbox, so the daemon port is
+never published on the host or the network, and the connection reuses the
+managed `*.sbx` SSH configuration written by `sbx setup ssh`. Paseo's own SSH
+transport does not install or start a remote daemon; `sbxr paseo` is what starts
+it. Agents Paseo launches there are the sandbox's own Claude, Codex, and Pi
+installations, with the sandbox's network policy and file access.
 
 ## Why `sbxr`? From project folder to agent-ready Rust IDE
 
@@ -472,11 +504,28 @@ remote, and workspace settings.
 
 Pi prompts, themes, skills, settings, and source extensions are mirrored by
 default. npm-based Pi extensions are installed without lifecycle scripts from
-the host `package-lock.json`, preserving its exact resolved versions instead of
-copying a host `node_modules` tree built for a potentially different Pi or
-platform. Set `SBXR_SYNC_PI_EXTENSIONS=0` to omit raw source extensions; package
+the semver ranges declared in the host `package.json`, resolved inside the
+sandbox against its own kit-pinned Pi release, instead of copying a host
+`node_modules` tree built for a potentially different Pi or platform. The host
+`package-lock.json` is deliberately not reused: those exact builds are selected
+against the host's Pi version, and an extension pinned that way can call an API
+the sandbox's Pi no longer exports, which makes every `pi` start fail to load
+it. Set `SBXR_SYNC_PI_EXTENSIONS=0` to omit raw source extensions; package
 declarations still follow the mirrored Pi settings. Details are in
 [ENVIRONMENT.md](ENVIRONMENT.md#mirroring-controls).
+
+A mirrored symbolic link is kept as a link only while it resolves inside the
+same mirrored tree. One pointing anywhere else—a Pi extension developed in a
+separate host checkout, for instance—is copied by content under the link's own
+name, because the sandbox has no copy of the path it names. A link the host
+itself cannot resolve is skipped.
+
+The host's shell conveniences are mirrored during the same bootstrap: the alias
+definitions in `~/.bashrc`, the whole of `~/.bash_aliases`, and the `~/bin`
+utility directory, which is appended to `PATH` so sandbox-managed toolchains
+keep priority over a mirrored command of the same name. The rest of the host
+`.bashrc` is not adopted, since it configures host paths and host-only
+integrations. Set `SBXR_SYNC_HOST_SHELL=0` to skip all of it.
 
 Mirrored hooks, plugins, skills, and extensions are executable software. Only
 mirror them from a trusted host profile.
@@ -498,6 +547,9 @@ mirror them from a trusted host profile.
 - `src/host.rs`: setup, preflight checks, and diagnostics;
 - `src/auth.rs`: credential-import offer, explicit import, and subscription
   status;
+- `kits/`: embedded declarative sandbox mixins, including `host-shell` for the
+  mirrored host aliases and `~/bin` PATH hook and `paseo-cli` for the pinned
+  Paseo CLI and its loopback-only daemon;
 - `src/vscode.rs`: Remote-SSH launch and extension mirroring;
 - `src/sync.rs`: pure-Rust capability selection, merges, path rewriting, tar
   streaming, and persistent bootstrap markers;

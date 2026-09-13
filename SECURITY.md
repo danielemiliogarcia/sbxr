@@ -64,10 +64,20 @@ not certify dependencies, extensions, or agent output as safe.
   has no host audio session. Other simple Claude hooks whose leading executable
   is unavailable are omitted with a warning; `sbxr` never installs arbitrary
   host-hook dependencies automatically.
-- Pi npm extension packages are installed at the exact host-lockfile versions
-  with lifecycle scripts disabled. Their runtime code, raw Pi extensions, and
-  mirrored Codex/Claude plugins still execute in the sandbox and must be
-  treated as trusted code.
+- Pi npm extension packages are resolved inside the sandbox from the semver
+  ranges the host `package.json` declares, with lifecycle scripts disabled. The
+  host lockfile is not reused, because its exact builds are selected against the
+  host's own Pi release and an extension pinned that way can fail to load
+  against the sandbox's kit-pinned Pi. Resolution therefore follows the host's
+  declared ranges rather than a host-verified version set. Their runtime code,
+  raw Pi extensions, and mirrored Codex/Claude plugins still execute in the
+  sandbox and must be treated as trusted code.
+- Host Bash aliases and every executable in the host `~/bin` are mirrored into
+  the sandbox and placed on `PATH`. They are host-authored code that runs there;
+  mirror them only from a trusted host profile, or set `SBXR_SYNC_HOST_SHELL=0`.
+- The sandbox Paseo daemon binds to the sandbox loopback interface with its
+  external relay disabled, so reaching it requires an SSH session into that
+  sandbox. Anyone who can open that session can drive the agents it controls.
 - `--rocksdb-host` trusts the selected host-built shared library and its ABI.
   The prefix is read-only, but a compromised or incompatible library still
   executes inside the sandbox process and can affect the mounted project.

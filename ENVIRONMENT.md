@@ -17,6 +17,7 @@ over equivalent environment variables.
 | `SBXR_SYNC_AGENT_CONFIG` | `0` to disable | Trusted-host Codex, Claude, and Pi extension/plugin and configuration mirroring is enabled |
 | `SBXR_SYNC_VSCODE_EXTENSIONS` | `0` to disable | Host VS Code extension mirroring is enabled |
 | `SBXR_SYNC_PI_EXTENSIONS` | `0` or `1` | Unset/`1` mirrors raw Pi source extensions; `0` omits them |
+| `SBXR_SYNC_HOST_SHELL` | `0` to disable | Host Bash aliases and the `~/bin` utility directory are mirrored |
 | `SBXR_CLAUDE_AUTH_FILE` | File path | `~/.claude/.credentials.json`; used by the first-open import offer and `auth-import` |
 | `SBXR_YES` | `1` to confirm | Automatically accepts the first-open Claude import offer and non-interactive `auth-import` |
 | `SBXR_PRESERVE_XDG_STATE_HOME` | `1` to preserve | `XDG_STATE_HOME` is removed from child `sbx` and VS Code commands |
@@ -127,10 +128,12 @@ SBXR_SYNC_VSCODE_EXTENSIONS=0 sbxr update .
 ```
 
 Pi prompts, themes, skills, settings, and raw source extensions are normally
-mirrored. npm-based extensions are resolved with `npm ci` from the copied host
-lockfile, with lifecycle scripts disabled, so their exact locked versions are
-installed for the sandbox instead of copying platform-specific `node_modules`.
-Disable copying raw source extensions when the host profile is not trusted:
+mirrored. npm-based extensions are resolved with `npm install`, with lifecycle
+scripts disabled, from the semver ranges declared in the copied host
+`package.json`, so each one is selected for the sandbox's own kit-pinned Pi
+release instead of copying platform-specific `node_modules` or reusing a host
+lockfile pinned against the host's Pi. Disable copying raw source extensions
+when the host profile is not trusted:
 
 ```bash
 SBXR_SYNC_PI_EXTENSIONS=0 sbxr update .  # omit raw source extensions
@@ -140,6 +143,17 @@ SBXR_SYNC_PI_EXTENSIONS=1 sbxr update .  # explicitly enable them (the default)
 The setting does not remove Pi package declarations from a mirrored
 `settings.json`; use `SBXR_SYNC_AGENT_CONFIG=0` to disable all agent capability
 and configuration mirroring.
+
+The alias definitions in the host `~/.bashrc`, the whole of `~/.bash_aliases`,
+and the `~/bin` utility directory are mirrored during the same bootstrap and
+wired into the sandbox's interactive shells. Disable that separately:
+
+```bash
+SBXR_SYNC_HOST_SHELL=0 sbxr update .
+```
+
+Mirrored host utilities are appended to `PATH`, so a sandbox-managed toolchain
+of the same name keeps priority. `~/bin/.git` is never copied.
 
 ## Authentication import variables
 
