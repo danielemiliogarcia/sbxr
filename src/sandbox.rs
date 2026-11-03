@@ -44,10 +44,11 @@ pub(crate) fn ensure_dev(
     preset: Preset,
     rocksdb: Option<&RocksDbHost>,
     force_sync: bool,
+    force_plan: bool,
 ) -> Result<sync::BootstrapState, String> {
     process::require("sbx")?;
     validate_kits(context)?;
-    sbx::require_minimum_version(context.preserve_xdg_state)?;
+    let sbx_version = sbx::require_minimum_version(context.preserve_xdg_state)?;
     let definition = envfile::materialize(
         context,
         project,
@@ -57,14 +58,24 @@ pub(crate) fn ensure_dev(
     if sandbox_exists(context, &project.name)? {
         definition.verify_existing(context.preserve_xdg_state)?;
         println!("==> reusing sandbox {}", project.name);
-        sbx::env_ensure_up(context.preserve_xdg_state, definition.path())?;
+        sbx::env_ensure_up(
+            context.preserve_xdg_state,
+            definition.path(),
+            sbx_version,
+            force_plan,
+        )?;
     } else {
         println!(
             "==> creating sandbox {} for {}",
             project.name,
             project.path.display()
         );
-        sbx::env_ensure_up(context.preserve_xdg_state, definition.path())?;
+        sbx::env_ensure_up(
+            context.preserve_xdg_state,
+            definition.path(),
+            sbx_version,
+            force_plan,
+        )?;
         definition.mark_applied(context.preserve_xdg_state)?;
     }
     maybe_initialize_empty_project(context, project)?;
@@ -166,11 +177,12 @@ pub(crate) fn ensure_review(
     context: &Context,
     project: &Project,
     rocksdb: Option<&RocksDbHost>,
+    force_plan: bool,
 ) -> Result<(), String> {
     process::require("sbx")?;
     process::require("git")?;
     validate_kits(context)?;
-    sbx::require_minimum_version(context.preserve_xdg_state)?;
+    let sbx_version = sbx::require_minimum_version(context.preserve_xdg_state)?;
     let git_status = Command::new("git")
         .arg("-C")
         .arg(&project.path)
@@ -187,13 +199,23 @@ pub(crate) fn ensure_review(
     if sandbox_exists(context, &project.review_name)? {
         definition.verify_existing(context.preserve_xdg_state)?;
         println!("==> reusing review sandbox {}", project.review_name);
-        sbx::env_ensure_up(context.preserve_xdg_state, definition.path())?;
+        sbx::env_ensure_up(
+            context.preserve_xdg_state,
+            definition.path(),
+            sbx_version,
+            force_plan,
+        )?;
     } else {
         println!(
             "==> creating no-OAuth clone-mode review sandbox {}",
             project.review_name
         );
-        sbx::env_ensure_up(context.preserve_xdg_state, definition.path())?;
+        sbx::env_ensure_up(
+            context.preserve_xdg_state,
+            definition.path(),
+            sbx_version,
+            force_plan,
+        )?;
         definition.mark_applied(context.preserve_xdg_state)?;
     }
     Ok(())
@@ -316,8 +338,9 @@ pub(crate) fn audit(
     project: &Project,
     preset: Preset,
     rocksdb: Option<&RocksDbHost>,
+    force_plan: bool,
 ) -> Result<(), String> {
-    ensure_dev(context, project, preset, rocksdb, false)?;
+    ensure_dev(context, project, preset, rocksdb, false, force_plan)?;
     let script = r#"
 set -euo pipefail
 cd -- "$1"

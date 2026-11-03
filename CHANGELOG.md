@@ -2,6 +2,60 @@
 
 ## Unreleased
 
+## [0.2.5] - 2026-11-02
+
+### Fixed
+
+- Cargo now fetches Git dependencies through the system Git CLI, allowing
+  private repositories to authenticate through Docker's forwarded SSH agent.
+  Sandbox bootstrap mirrors only same-scope `github.com` HTTPS-to-SSH rewrites
+  explicitly configured on the host; arbitrary rewrite destinations remain
+  excluded.
+
+## [0.2.4] - 2026-11-02
+
+### Fixed
+
+- Made the default Codex+Claude workload a sandbox agent kit extending Docker's
+  Codex agent. Docker only accepts OAuth declarations on the agent kit, so this
+  allows the Anthropic host-proxy credential to compose successfully instead of
+  failing creation when it was declared by the former Claude mixin.
+
+## [0.2.3] - 2026-11-02
+
+### Added
+
+- Added equivalent `-y`, `--yes-to-all`, and `--force` flags for sandbox
+  lifecycle commands. They forward `--force` to Docker's declarative
+  environment command so provisioning can skip the plan-approval prompt;
+  `sbxr up -y` provisions without opening VS Code.
+
+## [0.2.2] - 2026-11-02
+
+### Added
+
+- Added `sbxr --version` and `sbxr -V`; both print the installed version
+  without running host or KVM preflight checks.
+
+### Security
+
+- Claude subscription OAuth now uses Docker's host-side credential proxy in
+  the multi-agent kit. Claude and Pi receive only provider-shaped sentinels;
+  the legacy host credential import and Pi token-copy bridge are disabled.
+
+### Changed
+
+- Bumped the pinned sandbox Pi from 0.84.4 to 1.4.0 and updated its bundled
+  Codex-proxy compatibility patch for Pi's new distribution layout.
+
+### Fixed
+
+- Restored compatibility with Docker Sandboxes 0.48.0 and newer: `sbxr` now
+  accepts the top-level array emitted by `sbx ls --json` and uses the renamed
+  `sbx env run --detach` and `sbx diagnose --format json` flags. Docker
+  Sandboxes 0.39.0 through 0.47.x remain supported through their legacy output
+  shape and flag names.
+
 ## [0.2.1] - 2026-09-12
 
 ### Added

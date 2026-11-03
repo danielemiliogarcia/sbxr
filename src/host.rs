@@ -295,24 +295,30 @@ pub(crate) fn doctor(context: &Context, preset: Preset, rocksdb: Option<&RocksDb
     }
 
     if process::command_exists("sbx") {
-        match sbx::require_minimum_version(context.preserve_xdg_state) {
-            Ok(version) => println!("ok   Docker Sandboxes {version} (minimum 0.39.0)"),
+        let sbx_version = match sbx::require_minimum_version(context.preserve_xdg_state) {
+            Ok(version) => {
+                println!("ok   Docker Sandboxes {version} (minimum 0.39.0)");
+                Some(version)
+            }
             Err(error) => {
                 println!("FAIL {error}");
                 healthy = false;
+                None
             }
-        }
-        match sbx::diagnose_json(context.preserve_xdg_state) {
-            Ok(output) => match print_docker_diagnostics(&output.stdout) {
-                Ok(result) => healthy &= result,
+        };
+        if let Some(version) = sbx_version {
+            match sbx::diagnose_json(context.preserve_xdg_state, version) {
+                Ok(output) => match print_docker_diagnostics(&output.stdout) {
+                    Ok(result) => healthy &= result,
+                    Err(error) => {
+                        println!("FAIL {error}");
+                        healthy = false;
+                    }
+                },
                 Err(error) => {
                     println!("FAIL {error}");
                     healthy = false;
                 }
-            },
-            Err(error) => {
-                println!("FAIL {error}");
-                healthy = false;
             }
         }
         if preset.has_codex() {

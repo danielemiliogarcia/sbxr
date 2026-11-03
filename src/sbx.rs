@@ -9,6 +9,12 @@ const MINIMUM_VERSION: Version = Version {
     patch: 0,
 };
 
+const CLI_REFACTOR_VERSION: Version = Version {
+    major: 0,
+    minor: 48,
+    patch: 0,
+};
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct Version {
     major: u64,
@@ -39,6 +45,22 @@ impl Version {
             return Err(format!("invalid Docker Sandboxes version: {version}"));
         }
         Ok(parsed)
+    }
+
+    fn diagnose_format_flag(self) -> &'static str {
+        if self >= CLI_REFACTOR_VERSION {
+            "--format"
+        } else {
+            "--output"
+        }
+    }
+
+    fn env_detach_flag(self) -> &'static str {
+        if self >= CLI_REFACTOR_VERSION {
+            "--detach"
+        } else {
+            "--detached"
+        }
     }
 }
 
@@ -109,10 +131,13 @@ pub(crate) fn list_json(preserve_xdg_state: bool) -> Result<Output, String> {
 pub(crate) fn sandbox_state(json: &[u8], wanted: &str) -> Result<Option<String>, String> {
     let document: serde_json::Value = serde_json::from_slice(json)
         .map_err(|error| format!("could not parse Docker sandbox list: {error}"))?;
-    let sandboxes = document
-        .get("sandboxes")
-        .and_then(serde_json::Value::as_array)
-        .ok_or("Docker sandbox list has no sandboxes array")?;
+    let sandboxes = document.as_array().or_else(|| {
+        document
+            .get("sandboxes")
+            .and_then(serde_json::Value::as_array)
+    });
+    let sandboxes = sandboxes
+        .ok_or("Docker sandbox list is neither an array nor an object with a sandboxes array")?;
     Ok(sandboxes.iter().find_map(|sandbox| {
         (sandbox.get("name").and_then(serde_json::Value::as_str) == Some(wanted)).then(|| {
             sandbox
@@ -131,20 +156,36 @@ pub(crate) fn setup_ssh(preserve_xdg_state: bool) -> Result<(), String> {
     )
 }
 
-pub(crate) fn diagnose_json(preserve_xdg_state: bool) -> Result<Output, String> {
+pub(crate) fn diagnose_json(preserve_xdg_state: bool, version: Version) -> Result<Output, String> {
     process::output_checked(
-        command(preserve_xdg_state).args(["diagnose", "--output", "json"]),
+        command(preserve_xdg_state).args(["diagnose", version.diagnose_format_flag(), "json"]),
         "running Docker Sandboxes diagnostics",
     )
 }
 
-pub(crate) fn env_ensure_up(preserve_xdg_state: bool, definition: &Path) -> Result<(), String> {
-    process::run_checked(
-        command(preserve_xdg_state)
-            .args(["env", "run", "--detached"])
-            .arg(definition),
-        "creating or starting declarative sandbox",
-    )
+pub(crate) fn env_ensure_up(
+    preserve_xdg_state: bool,
+    definition: &Path,
+    version: Version,
+    force: bool,
+) -> Result<(), String> {
+    let mut command = env_run_command(preserve_xdg_state, definition, version, force);
+    process::run_checked(&mut command, "creating or starting declarative sandbox")
+}
+
+fn env_run_command(
+    preserve_xdg_state: bool,
+    definition: &Path,
+    version: Version,
+    force: bool,
+) -> Command {
+    let mut command = command(preserve_xdg_state);
+    command.args(["env", "run", version.env_detach_flag()]);
+    if force {
+        command.arg("--force");
+    }
+    command.arg(definition);
+    command
 }
 
 pub(crate) fn env_remove(
@@ -244,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn finds_sandbox_state_in_docker_json() {
+    fn finds_sandbox_state_in_legacy_docker_json() {
         let json = br#"{
           "sandboxes": [
             {"name":"rust-multi-one", "status":"running"},
@@ -256,6 +297,36 @@ mod tests {
             Some("stopped".to_owned())
         );
         assert_eq!(sandbox_state(json, "rust-multi-missing").unwrap(), None);
+    }
+
+    #[test]
+    fn finds_sandbox_state_in_current_docker_json() {
+        let json = br#"[
+          {"name":"rust-multi-one", "status":"running", "detached":true},
+          {"name":"rust-multi-two", "status":"stopped", "detached":false}
+        ]"#;
+        assert_eq!(
+            sandbox_state(json, "rust-multi-one").unwrap(),
+            Some("running".to_owned())
+        );
+        assert_eq!(sandbox_state(json, "rust-multi-missing").unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_unknown_sandbox_list_shape() {
+        let error = sandbox_state(br#"{"items": []}"#, "rust-multi-one").unwrap_err();
+        assert!(error.contains("neither an array nor an object"));
+    }
+
+    #[test]
+    fn selects_version_specific_cli_flags() {
+        let legacy = Version::parse("sbx version v0.47.0").unwrap();
+        assert_eq!(legacy.diagnose_format_flag(), "--output");
+        assert_eq!(legacy.env_detach_flag(), "--detached");
+
+        let current = Version::parse("sbx version v0.48.0").unwrap();
+        assert_eq!(current.diagnose_format_flag(), "--format");
+        assert_eq!(current.env_detach_flag(), "--detach");
     }
 
     #[test]
@@ -280,6 +351,26 @@ mod tests {
                 "rust-project",
                 "bash",
                 "-l"
+            ]
+        );
+    }
+
+    #[test]
+    fn forwards_force_to_declarative_environment_runs() {
+        let version = Version::parse("sbx version v0.50.1").unwrap();
+        let command = env_run_command(true, Path::new("/tmp/project.sbxenv.yaml"), version, true);
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            arguments,
+            [
+                "env",
+                "run",
+                "--detach",
+                "--force",
+                "/tmp/project.sbxenv.yaml"
             ]
         );
     }

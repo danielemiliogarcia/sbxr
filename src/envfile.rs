@@ -442,6 +442,17 @@ fn render(
         output.push_str(&yaml_path(&kit)?);
         output.push('\n');
     }
+    if matches!(kind, Kind::Development(preset) if preset.has_claude()) {
+        output.push_str("bindings:\n");
+        if matches!(kind, Kind::Development(Preset::MultiAgent)) {
+            output.push_str(
+                "  openai:\n    oauth:\n      domains:\n        - auth.openai.com\n        - chatgpt.com\n",
+            );
+        }
+        output.push_str(
+            "  anthropic:\n    oauth:\n      domains:\n        - platform.claude.com\n        - api.anthropic.com\n",
+        );
+    }
     if let Some(rocksdb) = rocksdb {
         output.push_str("additionalWorkspaces:\n  - path: ");
         output.push_str(&yaml_path(&rocksdb.prefix)?);
@@ -761,6 +772,13 @@ mod tests {
         assert!(development.contains("/trusted/kits/pi-cli"));
         assert!(!development.contains("codex-cli"));
         assert!(!development.contains("secret"));
+        assert!(development.contains("agent: \"sbxr-multi-agent\""));
+        assert!(development.contains("bindings:\n  openai:\n    oauth:"));
+        assert!(development.contains("- auth.openai.com"));
+        assert!(development.contains("- chatgpt.com"));
+        assert!(development.contains("  anthropic:\n    oauth:"));
+        assert!(development.contains("- platform.claude.com"));
+        assert!(development.contains("- api.anthropic.com"));
         assert!(development.contains("\"/work/project with spaces\""));
 
         let review = render(&context, &project, Kind::Review, None).unwrap();
@@ -768,6 +786,10 @@ mod tests {
         assert!(review.contains("clone: true"));
         assert!(!review.contains("github-ssh"));
         assert!(!review.contains("claude-cli"));
+        assert!(!review.contains("bindings:"));
+
+        let codex = render(&context, &project, Kind::Development(Preset::Codex), None).unwrap();
+        assert!(!codex.contains("bindings:"));
     }
 
     #[test]

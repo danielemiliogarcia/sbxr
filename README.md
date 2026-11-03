@@ -60,13 +60,13 @@ To build `sbxr` or contribute a feature, see the
 
 The default `rust-multi-agent` preset combines:
 
-- Docker's official `codex` agent with host-managed ChatGPT subscription OAuth;
+- an sbxr multi-agent kit extending Docker's official `codex` agent, with
+  host-managed ChatGPT subscription OAuth;
 - pinned Rust tooling, Cargo security tools, and a colored Git-aware Bash
   prompt, plus `nano`, Bash/Git completion, and a generated `en_US.UTF-8`
   locale for clean VS Code terminals;
-- pinned Claude Code with sandbox-local Claude subscription OAuth;
-- pinned Pi, connected to the Docker-managed Codex OAuth proxy and able to
-  detect the sandbox-local Claude login;
+- pinned Claude Code with Docker host-managed Claude subscription OAuth;
+- pinned Pi, connected to the Docker-managed Codex and Claude OAuth proxies;
 - the pinned Paseo CLI and a loopback-only Paseo daemon that host Paseo clients
   reach over the sandbox SSH transport;
 - VS Code Remote-SSH, including version-matched host extension installation;
@@ -93,15 +93,17 @@ orchestration.
 | Command | Purpose |
 |---|---|
 | `sbxr new .` | Create/reuse and open VS Code |
+| `sbxr new -y .` | Create/reuse without Docker's plan prompt, then open VS Code |
 | `sbxr vscode .` | Explicit alias for `sbxr new .` |
 | `sbxr update .` | Force host agent/VS Code mirroring, then open VS Code |
 | `sbxr up .` | Create/reuse without attaching |
+| `sbxr up -y .` | Create/reuse unattended without attaching or opening VS Code |
 | `sbxr shell .` | Open a project shell |
 | `sbxr codex .` | Run Codex |
 | `sbxr claude .` | Run Claude Code |
 | `sbxr pi .` | Run Pi in the multi-agent preset |
 | `sbxr paseo .` | Start the sandbox Paseo daemon and print its SSH URL |
-| `sbxr auth-import .` | Explicitly import a trusted host Claude cache |
+| `sbxr auth-import .` | Explain why legacy credential imports are disabled |
 | `sbxr auth-status .` | Check Codex, Claude, and Pi provider status |
 | `sbxr audit .` | Run cargo-audit, cargo-deny, and cargo-vet if configured |
 | `sbxr review .` | No-OAuth, clone-mode review sandbox |
@@ -113,6 +115,12 @@ orchestration.
 | `sbxr rm --force .` | Remove even while VS Code/SSH is connected |
 | `sbxr setup` | Configure missing Docker login, OpenAI OAuth, and Remote-SSH |
 | `sbxr doctor` | Run the complete read-only host diagnostic |
+| `sbxr --version` | Print the installed sbxr version |
+
+`-y`, `--yes-to-all`, and `--force` are equivalent. On commands that may create
+or start a sandbox, they pass `--force` to `sbx env run` and skip Docker's
+environment-plan approval prompt. On `sbxr rm`, they pass `--force` to
+`sbx env rm`. They do not copy credentials or perform a missing OAuth login.
 
 ## Git inside or outside the sandbox
 
@@ -130,6 +138,13 @@ model](https://docs.docker.com/ai/sandboxes/workflows/git/).
 If the host's `SSH_AUTH_SOCK` is stale, `sbxr` automatically selects a live
 standard desktop agent with loaded keys (such as GCR or GnuPG) before starting
 Docker Sandboxes; `sbxr doctor` reports when this fallback is active.
+
+Cargo Git dependencies use the system Git CLI so they can authenticate through
+that forwarded agent. `sbxr` also mirrors explicit host HTTPS-to-SSH rewrites
+only when both sides are the same path on `github.com`; arbitrary URL rewrites
+and rewrites to other hosts are rejected. This lets a host rule such as
+`https://github.com/FairgateLabs/` → `git@github.com:FairgateLabs/` work inside
+the sandbox without copying a GitHub token or private key.
 
 `sbxr` mirrors the host project's effective `commit.gpgSign` and `tag.gpgSign`
 defaults and `gpg.format`, including global settings and repository overrides.
@@ -386,11 +401,10 @@ code --install-extension ms-vscode-remote.remote-ssh
 | Everything already configured | Reports success without changing anything |
 
 Use `sbxr --preset rust-claude setup` when configuring a Claude-only
-installation; it skips OpenAI OAuth. Claude subscription login itself remains
-inside the sandbox. When a host Claude login is detected, the initial `sbxr
-new`/`sbxr vscode` bootstrap and explicit `sbxr update` offer to import it with
-an explicit credential warning; otherwise use Claude's native `/login` flow
-inside the sandbox.
+installation; it skips OpenAI OAuth. Start Claude with `sbxr claude .` and use
+its native `/login` flow. Docker intercepts that OAuth exchange and keeps the
+real access and refresh tokens on the host; only proxy sentinel values are
+written inside the sandbox. `sbxr` never imports a host Claude credential file.
 
 The first `sbxr new .` run writes a protected declarative environment outside
 the project, creates a deterministic project sandbox,
@@ -452,21 +466,20 @@ accidentally reusing a VM with a different agent composition.
 
 ## Subscriptions and customization
 
-Codex uses Docker's official host-managed OAuth path. The real OpenAI token is
-not copied into the VM. Claude is an additional CLI in the default preset, so
-it cannot use that Codex-specific proxy. When the host Claude cache exists and
-the sandbox has no Claude login, the initial editor bootstrap and `sbxr update`
-offer to import it after an explicit warning. `sbxr auth-import .` performs the
-same operation on demand. Same-user project code can read an imported Claude
-credential.
+Codex and Claude both use Docker's host-managed OAuth proxy. The generated
+environment explicitly approves only the OAuth token endpoint and provider API
+host required by the Claude kit. The real OpenAI and Anthropic tokens are not
+copied into the VM; Codex, Claude, and Pi see provider-shaped sentinel values
+that Docker replaces only on requests to the approved hosts. The legacy
+`sbxr auth-import` command is intentionally disabled so it cannot bypass this
+boundary.
 
-Pi recognizes Docker's Codex proxy sentinel, so `pi --provider openai-codex`
-uses the same ChatGPT subscription without receiving the real token. When a
-Claude login exists inside the sandbox, Pi maps it before launch and reconciles
-refreshes afterward. Do not run Claude and Pi concurrently while either is
-refreshing this credential. Pi documents third-party Claude OAuth use as
-Anthropic “extra usage,” potentially billed per token rather than against the
-normal plan allowance.
+Pi recognizes both proxy sentinels. `pi --provider openai-codex` uses the same
+ChatGPT subscription and `pi --provider anthropic` uses the same host-managed
+Claude login without receiving either real token. Docker owns refresh and
+routing, so Claude and Pi no longer synchronize credential files with each
+other. Pi documents third-party Claude OAuth use as Anthropic “extra usage,”
+potentially billed per token rather than against the normal plan allowance.
 
 The launcher mirrors the installed extension/plugin payloads in each agent's
 documented configuration tree, plus useful host configuration: instructions,

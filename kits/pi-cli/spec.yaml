@@ -1,9 +1,9 @@
 schemaVersion: "2"
 kind: mixin
 name: pi-cli
-version: "0.84.4"
+version: "1.4.0"
 displayName: Pi coding agent CLI
-description: Adds pinned Pi with native subscription OAuth and Docker-managed Codex OAuth detection.
+description: Adds pinned Pi with Docker host-managed Codex and Claude subscription OAuth.
 sourceURL: https://github.com/earendil-works/pi
 
 security:
@@ -13,6 +13,7 @@ permissions:
   network:
     allow:
       - registry.npmjs.org:443
+      - pi.dev:443
       - api.anthropic.com:443
       - platform.claude.com:443
       - claude.ai:443
@@ -37,8 +38,14 @@ setup:
         set -euo pipefail
         if [ -n "${HTTP_PROXY:-}" ]; then npm config set proxy "$HTTP_PROXY"; fi
         if [ -n "${HTTPS_PROXY:-}" ]; then npm config set https-proxy "$HTTPS_PROXY"; fi
-        if ! pi --version 2>/dev/null | grep -Fq '0.84.4'; then
-          npm install -g --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent@0.84.4
+        node -e '
+          const [major, minor] = process.versions.node.split(".").map(Number);
+          if (major < 22 || (major === 22 && minor < 19)) {
+            throw new Error(`Pi 1.4.0 requires Node >=22.19.0; found ${process.version}`);
+          }
+        '
+        if ! pi --version 2>/dev/null | grep -Fq '1.4.0'; then
+          npm install -g --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent@1.4.0
         fi
         pi --version
       user: "1000"
@@ -57,26 +64,46 @@ setup:
     - command: |
         set -euo pipefail
         PREFIX=$(npm config get prefix)
-        TARGET="$PREFIX/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js"
-        node - "$TARGET" <<'NODE'
+        PACKAGE="$PREFIX/lib/node_modules/@earendil-works/pi-coding-agent"
+        node - "$PACKAGE" <<'NODE'
         const fs = require("fs");
-        const path = process.argv[2];
-        let source = fs.readFileSync(path, "utf8");
-        const original = "function extractAccountId(token) {\n    try {";
-        const patched = 'function extractAccountId(token) {\n    if (token === "oai-oat01-proxy-managed") return "proxy-managed";\n    try {';
-        if (!source.includes("oai-oat01-proxy-managed")) {
-          if (!source.includes(original)) throw new Error("pinned Pi proxy patch target was not found");
-          source = source.replace(original, patched);
-          fs.writeFileSync(path, source);
+        const path = require("path");
+        const packageDir = process.argv[2];
+        const targets = [
+          path.join(packageDir, "node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js")
+        ];
+        const chunks = path.join(packageDir, "dist/bundle/chunks");
+        for (const file of fs.readdirSync(chunks)) {
+          if (file.startsWith("openai-codex-responses-") && file.endsWith(".js")) {
+            targets.push(path.join(chunks, file));
+          }
+        }
+        for (const target of targets) {
+          let source = fs.readFileSync(target, "utf8");
+          if (source.includes('token === "oai-oat01-proxy-managed"') ||
+              source.includes('token==="oai-oat01-proxy-managed"')) continue;
+          const replacements = [
+            [
+              "function extractAccountId(token) {\n    try {",
+              'function extractAccountId(token) {\n    if (token === "oai-oat01-proxy-managed") return "proxy-managed";\n    try {'
+            ],
+            [
+              "function extractAccountId(token){try{",
+              'function extractAccountId(token){if(token==="oai-oat01-proxy-managed")return"proxy-managed";try{'
+            ]
+          ];
+          const replacement = replacements.find(([original]) => source.includes(original));
+          if (!replacement) throw new Error(`Pi proxy patch target was not found in ${target}`);
+          source = source.replace(replacement[0], replacement[1]);
+          fs.writeFileSync(target, source);
         }
         NODE
-        if [ "${SBX_CRED_OPENAI_MODE:-}" = oauth ]; then
-          node <<'NODE'
+        node <<'NODE'
         const fs = require("fs");
         const path = "/home/agent/.pi/agent/auth.json";
         let auth = {};
         try { auth = JSON.parse(fs.readFileSync(path, "utf8")); } catch {}
-        if (!auth["openai-codex"] || auth["openai-codex"].source === "docker-sbx-proxy") {
+        if (!auth["openai-codex"] || auth["openai-codex"].type === "oauth") {
           auth["openai-codex"] = {
             type: "oauth",
             access: "oai-oat01-proxy-managed",
@@ -85,76 +112,21 @@ setup:
             accountId: "proxy-managed",
             source: "docker-sbx-proxy"
           };
-          fs.writeFileSync(path, JSON.stringify(auth, null, 2) + "\n", { mode: 0o600 });
         }
-        NODE
-        fi
-      user: "1000"
-      description: Let Pi detect Docker host-managed ChatGPT subscription OAuth without exposing its token
-
-    - command: |
-        set -euo pipefail
-        PREFIX=$(npm config get prefix)
-        PACKAGE="$PREFIX/lib/node_modules/@earendil-works/pi-coding-agent"
-        REAL="$PACKAGE/dist/cli.js"
-        BRIDGE="$PACKAGE/dist/rust-sbx-claude-auth-bridge.cjs"
-        SHIM="$PREFIX/bin/pi"
-        test -f "$REAL"
-        cat > "$BRIDGE" <<'NODE'
-        const fs = require("fs");
-        const path = require("path");
-        const mode = process.argv[2];
-        const home = process.env.HOME || "/home/agent";
-        const claudePath = path.join(home, ".claude", ".credentials.json");
-        const piDir = path.join(home, ".pi", "agent");
-        const piPath = path.join(piDir, "auth.json");
-        const marker = path.join(piDir, ".rust-sbx-claude-bridge");
-        const read = (file) => { try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return {}; } };
-        const write = (file, value) => {
-          fs.mkdirSync(path.dirname(file), { recursive: true });
-          fs.writeFileSync(file, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 });
-          fs.chmodSync(file, 0o600);
-        };
-        if (mode === "before") {
-          const claude = read(claudePath);
-          const oauth = claude.claudeAiOauth;
-          const pi = read(piPath);
-          if (oauth?.accessToken && oauth?.refreshToken && (!pi.anthropic || fs.existsSync(marker))) {
-            pi.anthropic = {
-              type: "oauth",
-              access: oauth.accessToken,
-              refresh: oauth.refreshToken,
-              expires: oauth.expiresAt || 0
-            };
-            write(piPath, pi);
-            fs.writeFileSync(marker, "shared-with-claude-code\n", { mode: 0o600 });
-          }
-        } else if (mode === "after" && fs.existsSync(marker)) {
-          const pi = read(piPath);
-          if (pi.anthropic?.access && pi.anthropic?.refresh) {
-            const claude = read(claudePath);
-            claude.claudeAiOauth = {
-              ...(claude.claudeAiOauth || {}),
-              accessToken: pi.anthropic.access,
-              refreshToken: pi.anthropic.refresh,
-              expiresAt: pi.anthropic.expires || 0
-            };
-            write(claudePath, claude);
-          }
+        if (!auth.anthropic || auth.anthropic.type === "oauth") {
+          auth.anthropic = {
+            type: "oauth",
+            access: "sk-ant-oat01-proxy-managed",
+            refresh: "sk-ant-ort01-proxy-managed",
+            expires: 4102444800000,
+            source: "docker-sbx-proxy"
+          };
         }
+        fs.writeFileSync(path, JSON.stringify(auth, null, 2) + "\n", { mode: 0o600 });
+        fs.chmodSync(path, 0o600);
         NODE
-        chmod 0600 "$BRIDGE"
-        rm -f "$SHIM"
-        printf '%s\n' \
-          '#!/bin/sh' \
-          "node '$BRIDGE' before" \
-          "node '$REAL' \"\$@\"" \
-          'status=$?' \
-          "node '$BRIDGE' after || true" \
-          'exit "$status"' > "$SHIM"
-        chmod 0755 "$SHIM"
       user: "1000"
-      description: Detect and safely reconcile a sandbox-local Claude subscription login for Pi
+      description: Configure Pi for Docker host-managed ChatGPT and Claude OAuth without exposing either token
 
 volumes:
   - path: /home/agent/.pi/agent

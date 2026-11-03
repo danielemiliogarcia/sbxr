@@ -1,10 +1,11 @@
 schemaVersion: "2"
-kind: mixin
-name: claude-cli
+kind: sandbox
+name: sbxr-multi-agent
 version: "2.1.239"
-displayName: Claude Code CLI
-description: Adds pinned Claude Code with persistent native Claude subscription authentication.
+displayName: sbxr Codex + Claude agent
+description: Extends Docker's Codex agent with pinned Claude Code and host-managed Claude subscription OAuth.
 sourceURL: https://github.com/anthropics/claude-code
+extends: codex
 
 security:
   privileged: false
@@ -21,6 +22,23 @@ permissions:
       - claude.com:443
       - mcp-proxy.anthropic.com:443
       - bridge.claudeusercontent.com:443
+
+credentials:
+  - service: anthropic
+    description: Claude subscription OAuth kept behind the Docker host proxy
+    oauth:
+      tokenEndpoint:
+        host: platform.claude.com
+        path: /v1/oauth/token
+      resourceHosts:
+        - api.anthropic.com
+      sentinels:
+        accessToken: sk-ant-oat01-proxy-managed
+        refreshToken: sk-ant-ort01-proxy-managed
+      credentialFile:
+        path: "~/.claude/.credentials.json"
+        template: |
+          {"claudeAiOauth":{"accessToken":"{{.AccessToken}}","refreshToken":"{{.RefreshToken}}","expiresAt":{{.ExpiresAt}},"scopes":{{.ScopesJSON}}}}
 
 environment:
   variables:
@@ -55,14 +73,13 @@ setup:
         rm -f "$SHIM"
         printf '%s\n' \
           '#!/bin/sh' \
-          '# Claude gives API-key variables precedence over subscription OAuth.' \
-          '# Remove the shell base kit proxy binding for this CLI only.' \
-          'unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL SBX_CRED_ANTHROPIC_MODE' \
+          '# Prefer the Docker-managed OAuth credential file over API-key variables.' \
+          'unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL' \
           "exec \"$REAL\" \"\$@\"" > "$SHIM"
         chmod 0755 "$SHIM"
         claude --version
       user: "1000"
-      description: Install pinned Claude Code and isolate it from the shell API-key proxy
+      description: Install pinned Claude Code and select Docker-managed subscription OAuth
 
     - command: |
         set -euo pipefail

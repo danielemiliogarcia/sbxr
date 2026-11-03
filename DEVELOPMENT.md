@@ -203,9 +203,11 @@ Run live checks when changing sandbox lifecycle, kits, host preflight,
 authentication, configuration mirroring, VS Code, process invocation, or
 platform integration.
 
-The declarative refactor was verified against `sbx 0.39.0` on 2026-08-26:
+The declarative refactor was verified against `sbx 0.39.0` on 2026-08-26.
+`sbxr` also accounts for the structured-output and flag changes introduced in
+`sbx 0.48.0`:
 
-- `sbx env run --detached` created a fresh environment and reconciled a
+- detached `sbx env run` created a fresh environment and reconciled a
   contract-matched existing one without opening an interactive shell;
 - clone mode kept the private clone at the original project path and exposed
   the host source separately at `/run/sandbox/source` read-only;

@@ -9,9 +9,15 @@ pub(crate) fn run() -> Result<i32, String> {
     let action = cli.action;
     let preset = cli.preset;
     let rocksdb_requested = cli.rocksdb;
+    let force = cli.force;
 
     if matches!(action, Action::Help) {
         cli::print_usage();
+        return Ok(0);
+    }
+
+    if matches!(action, Action::Version) {
+        cli::print_version();
         return Ok(0);
     }
 
@@ -44,21 +50,21 @@ pub(crate) fn run() -> Result<i32, String> {
 
     match action {
         Action::New(_) | Action::Code(_) => {
-            open_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
+            open_dev(&context, &project, preset, rocksdb.as_ref(), false, force)?;
         }
         Action::Update(_) => {
-            open_dev(&context, &project, preset, rocksdb.as_ref(), true)?;
+            open_dev(&context, &project, preset, rocksdb.as_ref(), true, force)?;
         }
         Action::Up(_) => {
-            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
+            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false, force)?;
             print_ready(&context, &project);
         }
         Action::Shell(_) => {
-            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
+            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false, force)?;
             sandbox::run_remote(&context, &project, &["bash", "-l"])?;
         }
         Action::Codex(_) => {
-            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
+            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false, force)?;
             if !preset.has_codex() {
                 return Err(format!(
                     "Codex is not installed by the {} preset",
@@ -68,7 +74,7 @@ pub(crate) fn run() -> Result<i32, String> {
             sandbox::run_remote(&context, &project, &["codex"])?;
         }
         Action::Claude(_) => {
-            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
+            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false, force)?;
             if !preset.has_claude() {
                 return Err(format!(
                     "Claude is not installed by the {} preset",
@@ -78,7 +84,7 @@ pub(crate) fn run() -> Result<i32, String> {
             sandbox::run_remote(&context, &project, &["claude"])?;
         }
         Action::Pi(_) => {
-            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
+            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false, force)?;
             if preset != cli::Preset::MultiAgent {
                 return Err(format!(
                     "Pi is not installed by the {} preset",
@@ -88,7 +94,7 @@ pub(crate) fn run() -> Result<i32, String> {
             sandbox::run_remote(&context, &project, &["pi"])?;
         }
         Action::Paseo(_) => {
-            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
+            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false, force)?;
             let endpoint = sandbox::paseo_endpoint(&context, &project)?;
             println!("{endpoint}");
             println!(
@@ -99,13 +105,13 @@ pub(crate) fn run() -> Result<i32, String> {
             auth::import(&context, &project, preset, rocksdb.as_ref())?;
         }
         Action::AuthStatus(_) => {
-            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false)?;
+            sandbox::ensure_dev(&context, &project, preset, rocksdb.as_ref(), false, force)?;
             auth::show_status(&context, &project.name, preset);
         }
-        Action::Audit(_) => sandbox::audit(&context, &project, preset, rocksdb.as_ref())?,
+        Action::Audit(_) => sandbox::audit(&context, &project, preset, rocksdb.as_ref(), force)?,
         Action::Review(_) => {
             vscode::check_host()?;
-            sandbox::ensure_review(&context, &project, rocksdb.as_ref())?;
+            sandbox::ensure_review(&context, &project, rocksdb.as_ref(), force)?;
             vscode::open(&context, &project.review_name, &project.path, false, true)?;
         }
         Action::Inspect(_) => {
@@ -146,7 +152,7 @@ pub(crate) fn run() -> Result<i32, String> {
             sbx::env_remove(context.preserve_xdg_state, definition.path(), force)?;
             definition.remove_host_state(&context.state_root)?;
         }
-        Action::Setup | Action::Doctor | Action::Help => unreachable!(),
+        Action::Setup | Action::Doctor | Action::Version | Action::Help => unreachable!(),
     }
     Ok(0)
 }
@@ -157,15 +163,13 @@ fn open_dev(
     preset: cli::Preset,
     rocksdb: Option<&RocksDbHost>,
     force_sync: bool,
+    force_plan: bool,
 ) -> Result<(), String> {
     vscode::check_host()?;
     if force_sync {
         println!("==> forcing host integration update for {}", project.name);
     }
-    let mut state = sandbox::ensure_dev(context, project, preset, rocksdb, force_sync)?;
-    if force_sync || !state.vscode {
-        auth::offer_host_import(context, project, preset)?;
-    }
+    let mut state = sandbox::ensure_dev(context, project, preset, rocksdb, force_sync, force_plan)?;
     if vscode::open(context, &project.name, &project.path, true, !state.vscode)? {
         state.vscode = true;
         crate::sync::write_bootstrap_state(&project.name, context.preserve_xdg_state, state)?;

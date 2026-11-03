@@ -18,8 +18,6 @@ over equivalent environment variables.
 | `SBXR_SYNC_VSCODE_EXTENSIONS` | `0` to disable | Host VS Code extension mirroring is enabled |
 | `SBXR_SYNC_PI_EXTENSIONS` | `0` or `1` | Unset/`1` mirrors raw Pi source extensions; `0` omits them |
 | `SBXR_SYNC_HOST_SHELL` | `0` to disable | Host Bash aliases and the `~/bin` utility directory are mirrored |
-| `SBXR_CLAUDE_AUTH_FILE` | File path | `~/.claude/.credentials.json`; used by the first-open import offer and `auth-import` |
-| `SBXR_YES` | `1` to confirm | Automatically accepts the first-open Claude import offer and non-interactive `auth-import` |
 | `SBXR_PRESERVE_XDG_STATE_HOME` | `1` to preserve | `XDG_STATE_HOME` is removed from child `sbx` and VS Code commands |
 
 Values other than the documented control value generally behave like the
@@ -154,28 +152,6 @@ SBXR_SYNC_HOST_SHELL=0 sbxr update .
 
 Mirrored host utilities are appended to `PATH`, so a sandbox-managed toolchain
 of the same name keeps priority. `~/bin/.git` is never copied.
-
-## Authentication import variables
-
-`SBXR_CLAUDE_AUTH_FILE` selects a trusted host Claude OAuth cache for the
-first-open import offer and the explicit `auth-import` command:
-
-```bash
-SBXR_CLAUDE_AUTH_FILE=/secure/path/claude-credentials.json \
-  sbxr auth-import .
-```
-
-`SBXR_YES=1` bypasses the interactive warning for automation:
-
-```bash
-SBXR_YES=1 sbxr auth-import .
-```
-
-This copies Claude refresh credentials into the project sandbox. Code, build
-scripts, procedural macros, and agents running as the sandbox user can read
-them. Use `SBXR_YES=1` only for an already trusted project and automation
-environment. Codex OAuth is host-managed by Docker and is never selected with
-these variables.
 
 ## `XDG_STATE_HOME` compatibility
 

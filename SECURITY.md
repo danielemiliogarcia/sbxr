@@ -27,7 +27,8 @@ not certify dependencies, extensions, or agent output as safe.
   scripts and package checksums are recorded in `THIRD_PARTY_REVIEW.md`. This
   addresses the bootstrap chicken-and-egg problem: installing the isolation
   launcher does not first fetch a newly resolved dependency graph.
-- Official Codex keeps the real ChatGPT OAuth token outside the VM.
+- Docker's credential proxy keeps the real ChatGPT and Claude OAuth tokens
+  outside the VM. Codex, Claude, and Pi receive only host-scoped sentinels.
 - GitHub authentication and enabled or explicitly requested SSH signing use
   Docker's forwarded host SSH agent; private SSH keys are not copied into the
   VM. Automatic commit/tag signing follows the host project's effective Git
@@ -55,8 +56,9 @@ not certify dependencies, extensions, or agent output as safe.
 - Normal development windows disable VS Code Workspace Trust for that session
   because the microVM is the execution boundary; clone-mode `review` windows
   retain Workspace Trust.
-- Claude credentials imported or created in the VM are readable by code
-  running as `agent`. Pi's Claude bridge uses that same credential.
+- The sandbox can read OAuth sentinel strings, but Docker replaces them only
+  for the approved provider hosts. `sbxr` no longer copies host Claude
+  credential files into the VM or bridges real tokens between Claude and Pi.
 - Mirrored hooks, plugins, skills, prompts, and VS Code extensions execute code
   and expand the trusted computing base.
 - The recognized `rtk hook claude` executable is copied from the trusted host
@@ -111,8 +113,9 @@ not certify dependencies, extensions, or agent output as safe.
 7. Keep private SSH-key files, Cargo publish tokens, cloud credentials, and
    production secrets out of project sandboxes; prefer Docker's host-side
    credential and SSH-agent forwarding mechanisms.
-8. Import Claude OAuth only into trusted sandboxes, and avoid concurrent
-   Claude/Pi credential refresh.
+8. Authenticate Claude through its native `/login` flow so Docker can retain
+   the real OAuth tokens behind the host proxy; never paste or copy tokens into
+   the sandbox.
 9. Inspect blocked egress with `sbx policy log "$(sbxr name)"`.
 10. Remove a suspected sandbox with `sbxr rm` rather than reusing its
     caches. Sandbox-local deletion is irreversible; host project files remain.

@@ -39,7 +39,8 @@ impl Preset {
 
     pub(crate) fn primary_agent(self) -> &'static str {
         match self {
-            Self::MultiAgent | Self::Codex => "codex",
+            Self::MultiAgent => "sbxr-multi-agent",
+            Self::Codex => "codex",
             Self::Claude => "claude",
         }
     }
@@ -56,6 +57,7 @@ impl Preset {
 pub(crate) struct Cli {
     pub(crate) preset: Preset,
     pub(crate) rocksdb: Option<PathBuf>,
+    pub(crate) force: bool,
     pub(crate) action: Action,
 }
 
@@ -64,6 +66,21 @@ impl Cli {
         mut arguments: Vec<OsString>,
         environment: Option<OsString>,
     ) -> Result<Self, String> {
+        let mut force = false;
+        let mut filtered = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            if matches!(argument.to_str(), Some("-y" | "--yes-to-all" | "--force")) {
+                if force {
+                    return Err(
+                        "-y, --yes-to-all, and --force are aliases; supply only one".to_owned()
+                    );
+                }
+                force = true;
+            } else {
+                filtered.push(argument);
+            }
+        }
+        arguments = filtered;
         let mut preset = match environment {
             Some(value) => Preset::parse(&value)?,
             None => Preset::MultiAgent,
@@ -104,10 +121,22 @@ impl Cli {
                 break;
             }
         }
+        let mut action = Action::parse(arguments)?;
+        if force && !action.accepts_force() {
+            return Err("-y, --yes-to-all, and --force apply only to commands that create, start, or remove a sandbox".to_owned());
+        }
+        if let Action::Remove {
+            force: remove_force,
+            ..
+        } = &mut action
+        {
+            *remove_force = force;
+        }
         Ok(Self {
             preset,
             rocksdb,
-            action: Action::parse(arguments)?,
+            force,
+            action,
         })
     }
 }
@@ -134,6 +163,7 @@ pub(crate) enum Action {
     Remove { path: Option<PathBuf>, force: bool },
     Setup,
     Doctor,
+    Version,
     Help,
 }
 
@@ -145,7 +175,7 @@ impl Action {
         let command = arguments[0].to_string_lossy();
         if matches!(
             command.as_ref(),
-            "setup" | "doctor" | "help" | "-h" | "--help"
+            "setup" | "doctor" | "help" | "-h" | "--help" | "-V" | "--version"
         ) {
             if arguments.len() != 1 {
                 return Err(format!("{command} does not accept arguments"));
@@ -153,6 +183,7 @@ impl Action {
             return Ok(match command.as_ref() {
                 "setup" => Self::Setup,
                 "doctor" => Self::Doctor,
+                "-V" | "--version" => Self::Version,
                 _ => Self::Help,
             });
         }
@@ -206,6 +237,25 @@ impl Action {
         Ok(Self::Remove { path, force })
     }
 
+    fn accepts_force(&self) -> bool {
+        matches!(
+            self,
+            Self::New(_)
+                | Self::Code(_)
+                | Self::Update(_)
+                | Self::Up(_)
+                | Self::Shell(_)
+                | Self::Codex(_)
+                | Self::Claude(_)
+                | Self::Pi(_)
+                | Self::Paseo(_)
+                | Self::AuthStatus(_)
+                | Self::Audit(_)
+                | Self::Review(_)
+                | Self::Remove { .. }
+        )
+    }
+
     pub(crate) fn path(&self) -> Option<&Path> {
         match self {
             Self::New(path)
@@ -226,7 +276,7 @@ impl Action {
             | Self::Status(path)
             | Self::Stop(path) => path.as_deref(),
             Self::Remove { path, .. } => path.as_deref(),
-            Self::Setup | Self::Doctor | Self::Help => None,
+            Self::Setup | Self::Doctor | Self::Version | Self::Help => None,
         }
     }
 
@@ -246,7 +296,12 @@ impl Action {
             | Self::Status(_)
             | Self::Stop(_)
             | Self::Remove { .. } => &["sbx"],
-            Self::Inspect(_) | Self::Name(_) | Self::Setup | Self::Doctor | Self::Help => &[],
+            Self::Inspect(_)
+            | Self::Name(_)
+            | Self::Setup
+            | Self::Doctor
+            | Self::Version
+            | Self::Help => &[],
         }
     }
 
@@ -282,7 +337,7 @@ pub(crate) fn print_usage() {
         r#"sbxr — project-scoped Rust development sandboxes (Rust implementation)
 
 Usage:
-  sbxr [--preset PRESET] [--rocksdb-host[=PREFIX]] [new] [PATH]
+  sbxr [--preset PRESET] [--rocksdb-host[=PREFIX]] [-y|--yes-to-all|--force] [new] [PATH]
   sbxr [new] [PATH]        Create/reuse the sandbox and open VS Code
   sbxr vscode [PATH]       Explicit alias for `sbxr new`
   sbxr code [PATH]         Legacy alias for `sbxr new`
@@ -293,7 +348,7 @@ Usage:
   sbxr claude [PATH]       Run Claude Code with a Claude subscription
   sbxr pi [PATH]           Run Pi with detected Codex/Claude subscriptions
   sbxr paseo [PATH]        Start the sandbox Paseo daemon and print its SSH URL
-  sbxr auth-import [PATH]  Explicitly import trusted host OAuth caches
+  sbxr auth-import [PATH]  Explain the removal of sandbox credential imports
   sbxr auth-status [PATH]  Show subscription login status
   sbxr audit [PATH]        Run cargo-audit, cargo-deny, and cargo-vet
   sbxr review [PATH]       Open a no-OAuth clone-mode review sandbox
@@ -304,6 +359,7 @@ Usage:
   sbxr rm [--force] [PATH] Remove sandbox state; host files remain
   sbxr setup               Configure missing login, OAuth, and Remote-SSH
   sbxr doctor              Check host prerequisites and vendored kits
+  sbxr --version           Print the installed sbxr version
   sbxr help
 
 PATH defaults to the current directory. PRESET is rust-multi-agent (default),
@@ -312,9 +368,16 @@ name is preset-specific unless SBXR_NAME overrides it. SBXR_KIT_ROOT
 overrides the vendored kit directory. SBXR_STATE_ROOT overrides the protected
 host-side environment-definition directory. Set SBXR_SYNC_AGENT_CONFIG=0 or
 SBXR_SYNC_VSCODE_EXTENSIONS=0 to disable the corresponding host mirror.
+-y, --yes-to-all, and --force are equivalent and pass --force to Docker's
+environment command, skipping its plan-approval prompt. Flags may appear before
+or after the command. Use `sbxr up -y` for creation without opening VS Code.
 --rocksdb-host is opt-in and mounts /opt/rocksdb-10.4.2 read-only; use
 --rocksdb-host=PREFIX or SBXR_ROCKSDB_HOST for another installation."#
     );
+}
+
+pub(crate) fn print_version() {
+    println!("sbxr {}", env!("CARGO_PKG_VERSION"));
 }
 
 #[cfg(test)]
@@ -368,6 +431,15 @@ mod tests {
             Action::Setup
         ));
         assert!(Action::parse(vec!["setup".into(), ".".into()]).is_err());
+        assert!(matches!(
+            Action::parse(vec!["--version".into()]).unwrap(),
+            Action::Version
+        ));
+        assert!(matches!(
+            Action::parse(vec!["-V".into()]).unwrap(),
+            Action::Version
+        ));
+        assert!(Action::parse(vec!["--version".into(), ".".into()]).is_err());
     }
 
     #[test]
@@ -408,6 +480,10 @@ mod tests {
         assert!(inspect.required_host_commands().is_empty());
         assert!(!inspect.needs_kvm());
 
+        let version = Action::Version;
+        assert!(version.required_host_commands().is_empty());
+        assert!(!version.needs_kvm());
+
         let status = Action::Status(None);
         assert_eq!(status.required_host_commands(), ["sbx"]);
         assert!(!status.needs_kvm());
@@ -417,6 +493,7 @@ mod tests {
     fn defaults_to_multi_agent_and_parses_presets() {
         let default = Cli::parse(vec![], None).unwrap();
         assert_eq!(default.preset, Preset::MultiAgent);
+        assert!(!default.force);
         let codex = Cli::parse(
             vec!["--preset".into(), "rust-codex".into(), "up".into()],
             None,
@@ -432,5 +509,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rocksdb.rocksdb, Some(PathBuf::from("/opt/rocksdb-10.4.2")));
+    }
+
+    #[test]
+    fn parses_force_aliases_before_or_after_creation_commands() {
+        for arguments in [
+            vec!["-y".into(), "new".into(), "/tmp/project".into()],
+            vec!["new".into(), "--yes-to-all".into(), "/tmp/project".into()],
+            vec!["new".into(), "/tmp/project".into(), "--force".into()],
+        ] {
+            let parsed = Cli::parse(arguments, None).unwrap();
+            assert!(parsed.force);
+            assert!(matches!(parsed.action, Action::New(Some(_))));
+        }
+
+        let remove =
+            Cli::parse(vec!["rm".into(), "-y".into(), "/tmp/project".into()], None).unwrap();
+        assert!(matches!(
+            remove.action,
+            Action::Remove {
+                path: Some(_),
+                force: true
+            }
+        ));
+        assert!(Cli::parse(vec!["status".into(), "-y".into()], None).is_err());
+        assert!(Cli::parse(vec!["new".into(), "-y".into(), "--force".into()], None).is_err());
     }
 }
