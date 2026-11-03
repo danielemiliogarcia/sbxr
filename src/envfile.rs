@@ -1,5 +1,6 @@
 use crate::cli::Preset;
 use crate::environment::{Context, Project, RocksDbHost};
+use crate::profile::Profile;
 use crate::{sbx, sha256};
 use serde_json::json;
 use std::ffi::OsStr;
@@ -17,6 +18,7 @@ static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Kind {
     Development(Preset),
+    Isolated(Preset),
     Review,
 }
 
@@ -164,7 +166,7 @@ impl Definition {
     fn recreate_message(&self) -> String {
         let project = shell_display(&self.project_path);
         match self.kind {
-            Kind::Development(preset) => {
+            Kind::Development(preset) | Kind::Isolated(preset) => {
                 let mut prefix = String::new();
                 if self.name_overridden {
                     prefix.push_str("SBXR_NAME=");
@@ -189,11 +191,11 @@ impl Definition {
     }
 }
 
-pub(crate) fn development_path(context: &Context, project: &Project) -> PathBuf {
+pub(crate) fn definition_path(context: &Context, sandbox_name: &str) -> PathBuf {
     context
         .state_root
         .join("projects")
-        .join(&project.name)
+        .join(sandbox_name)
         .join("definitions/.sbxenv.yaml")
 }
 
@@ -202,9 +204,11 @@ pub(crate) fn inspect(
     project: &Project,
     kind: Kind,
     rocksdb: Option<&RocksDbHost>,
+    profile: &Profile,
 ) -> Result<Inspection, String> {
     let sandbox_name = match kind {
         Kind::Development(_) => &project.name,
+        Kind::Isolated(_) => &project.isolated_name,
         Kind::Review => &project.review_name,
     };
     let state_directory = context.state_root.join("projects").join(sandbox_name);
@@ -228,7 +232,7 @@ pub(crate) fn inspect(
     let environment_path = definitions.join(".sbxenv.yaml");
     let metadata_path = metadata_directory.join("contract.json");
     reject_symlink_file(&environment_path)?;
-    let current = render(context, project, kind, rocksdb)?;
+    let current = render(context, project, kind, rocksdb, profile)?;
     let stored = match fs::read_to_string(&environment_path) {
         Ok(contents) => Some(contents),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -250,7 +254,7 @@ pub(crate) fn inspect(
             "recreation required: materialized YAML differs from the current desired declaration"
                 .to_owned()
         } else {
-            match contract_hash(context, kind, rocksdb, current.as_bytes()) {
+            match contract_hash(context, kind, rocksdb, profile, current.as_bytes()) {
                 Ok(current_hash) => match record.as_ref() {
                     Some(record)
                         if record
@@ -330,9 +334,11 @@ pub(crate) fn materialize(
     project: &Project,
     kind: Kind,
     rocksdb: Option<&RocksDbHost>,
+    profile: &Profile,
 ) -> Result<Definition, String> {
     let sandbox_name = match kind {
         Kind::Development(_) => &project.name,
+        Kind::Isolated(_) => &project.isolated_name,
         Kind::Review => &project.review_name,
     };
     let state_directory = context.state_root.join("projects").join(sandbox_name);
@@ -355,9 +361,9 @@ pub(crate) fn materialize(
 
     let path = definitions.join(".sbxenv.yaml");
     reject_symlink_file(&path)?;
-    let contents = render(context, project, kind, rocksdb)?;
+    let contents = render(context, project, kind, rocksdb, profile)?;
     atomic_write(&path, contents.as_bytes())?;
-    let contract_hash = contract_hash(context, kind, rocksdb, contents.as_bytes())?;
+    let contract_hash = contract_hash(context, kind, rocksdb, profile, contents.as_bytes())?;
 
     let definition = Definition {
         path,
@@ -421,12 +427,14 @@ fn render(
     project: &Project,
     kind: Kind,
     rocksdb: Option<&RocksDbHost>,
+    profile: &Profile,
 ) -> Result<String, String> {
     let (sandbox_name, agent, clone) = match kind {
-        Kind::Development(preset) => (&project.name, preset.primary_agent(), false),
+        Kind::Development(preset) => (&project.name, agent_name(preset, profile), false),
+        Kind::Isolated(preset) => (&project.isolated_name, agent_name(preset, profile), true),
         Kind::Review => (&project.review_name, "shell", true),
     };
-    let kits = selected_kits(context, kind, rocksdb.is_some());
+    let kits = selected_kits(context, kind, rocksdb.is_some(), profile);
     let mut output = String::new();
     output.push_str("schemaVersion: \"1\"\nname: ");
     output.push_str(&yaml_string(sandbox_name)?);
@@ -436,22 +444,60 @@ fn render(
     output.push_str(&yaml_path(&project.path)?);
     output.push_str("\n  clone: ");
     output.push_str(if clone { "true" } else { "false" });
-    output.push_str("\nkits:\n");
+    output.push('\n');
+    if profile.resources.memory.is_some() || profile.resources.cpus.is_some() {
+        output.push_str("sandboxOptions:\n");
+        if let Some(memory) = &profile.resources.memory {
+            output.push_str("  memory: ");
+            output.push_str(&yaml_string(memory)?);
+            output.push('\n');
+        }
+        if let Some(cpus) = profile.resources.cpus {
+            output.push_str("  cpus: ");
+            output.push_str(&cpus.to_string());
+            output.push('\n');
+        }
+    }
+    output.push_str("kits:\n");
     for kit in kits {
         output.push_str("  - ");
         output.push_str(&yaml_path(&kit)?);
         output.push('\n');
     }
-    if matches!(kind, Kind::Development(preset) if preset.has_claude()) {
+    if matches!(kind, Kind::Development(_) | Kind::Isolated(_)) {
         output.push_str("bindings:\n");
-        if matches!(kind, Kind::Development(Preset::MultiAgent)) {
+        if matches!(
+            kind,
+            Kind::Development(Preset::MultiAgent | Preset::Codex)
+                | Kind::Isolated(Preset::MultiAgent | Preset::Codex)
+        ) {
             output.push_str(
                 "  openai:\n    oauth:\n      domains:\n        - auth.openai.com\n        - chatgpt.com\n",
             );
         }
-        output.push_str(
-            "  anthropic:\n    oauth:\n      domains:\n        - platform.claude.com\n        - api.anthropic.com\n",
-        );
+        if matches!(
+            kind,
+            Kind::Development(Preset::MultiAgent | Preset::Claude)
+                | Kind::Isolated(Preset::MultiAgent | Preset::Claude)
+        ) {
+            output.push_str(
+                "  anthropic:\n    oauth:\n      domains:\n        - platform.claude.com\n        - api.anthropic.com\n",
+            );
+        }
+        if profile.github_proxy {
+            output.push_str("  github:\n    apiKey:\n      domains:\n        - api.github.com\n        - github.com\n");
+            output.push_str("secrets:\n  github:\n    command: /usr/bin/gh auth token\n");
+        }
+        if profile.ghcr {
+            output.push_str(
+                "registries:\n  ghcr.io:\n    secret:\n      command: /usr/bin/gh auth token\n",
+            );
+        }
+        if profile.orca {
+            output.push_str("ports:\n  - host: ");
+            output.push_str(&orca_host_port(sandbox_name).to_string());
+            output.push_str("\n    sandbox: 6768\n    hostIP: 127.0.0.1\n");
+        }
     }
     if let Some(rocksdb) = rocksdb {
         output.push_str("additionalWorkspaces:\n  - path: ");
@@ -467,17 +513,36 @@ fn render(
     Ok(output)
 }
 
-fn selected_kits(context: &Context, kind: Kind, rocksdb: bool) -> Vec<PathBuf> {
+pub(crate) fn selected_kits(
+    context: &Context,
+    kind: Kind,
+    rocksdb: bool,
+    profile: &Profile,
+) -> Vec<PathBuf> {
     let mut kits = vec![context.kit_root.join("rust")];
-    if let Kind::Development(preset) = kind {
+    if let Kind::Development(preset) | Kind::Isolated(preset) = kind {
         kits.push(context.kit_root.join("host-shell"));
         kits.push(context.kit_root.join("git-ssh-sign"));
         kits.push(context.kit_root.join("github-ssh"));
+        if preset == Preset::Codex {
+            kits.push(context.kit_root.join("github-proxy-codex"));
+        } else if preset == Preset::Claude {
+            kits.push(context.kit_root.join("github-proxy-claude"));
+        }
         if preset == Preset::MultiAgent {
             kits.push(context.kit_root.join("claude-cli"));
             kits.push(context.kit_root.join("pi-cli"));
         }
         kits.push(context.kit_root.join("paseo-cli"));
+        if profile.browser {
+            kits.push(context.kit_root.join("browser"));
+        }
+        if profile.orca {
+            kits.push(context.kit_root.join("orca-server"));
+        }
+        if profile.ghcr {
+            kits.push(context.kit_root.join("ghcr"));
+        }
     }
     if rocksdb {
         kits.push(context.kit_root.join("rocksdb-host"));
@@ -487,22 +552,107 @@ fn selected_kits(context: &Context, kind: Kind, rocksdb: bool) -> Vec<PathBuf> {
     kits
 }
 
+pub(crate) fn agent_name(preset: Preset, profile: &Profile) -> &'static str {
+    if profile.github_proxy {
+        match preset {
+            Preset::Codex => "sbxr-codex-github",
+            Preset::Claude => "sbxr-claude-github",
+            Preset::MultiAgent => "sbxr-multi-agent",
+        }
+    } else {
+        preset.primary_agent()
+    }
+}
+
 fn contract_hash(
     context: &Context,
     kind: Kind,
     rocksdb: Option<&RocksDbHost>,
+    profile: &Profile,
     definition: &[u8],
 ) -> Result<String, String> {
     let mut input = b"sbxr-environment-contract-v1\0".to_vec();
     append_contract_part(&mut input, definition);
-    for kit in selected_kits(context, kind, rocksdb.is_some()) {
-        let spec = kit.join("spec.yaml");
-        let contents = fs::read(&spec)
-            .map_err(|error| format!("could not hash selected kit {}: {error}", spec.display()))?;
+    append_contract_part(&mut input, &crate::profile::contract_bytes(profile)?);
+    for kit in selected_kits(context, kind, rocksdb.is_some(), profile) {
         append_contract_part(&mut input, kit.as_os_str().as_encoded_bytes());
-        append_contract_part(&mut input, &contents);
+        for file in kit_contract_files(&kit)? {
+            let relative = file.strip_prefix(&kit).map_err(|error| {
+                format!(
+                    "could not make selected kit file {} relative to {}: {error}",
+                    file.display(),
+                    kit.display()
+                )
+            })?;
+            let contents = fs::read(&file).map_err(|error| {
+                format!(
+                    "could not hash selected kit file {}: {error}",
+                    file.display()
+                )
+            })?;
+            append_contract_part(&mut input, relative.as_os_str().as_encoded_bytes());
+            append_contract_part(&mut input, &contents);
+        }
     }
     Ok(sha256::hex(&input))
+}
+
+pub(crate) fn orca_host_port(sandbox_name: &str) -> u16 {
+    let digest = sha256::digest(sandbox_name.as_bytes());
+    42000 + u16::from_be_bytes([digest[0], digest[1]]) % 10000
+}
+
+fn kit_contract_files(root: &Path) -> Result<Vec<PathBuf>, String> {
+    fn visit(directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+        let mut entries = fs::read_dir(directory)
+            .map_err(|error| {
+                format!(
+                    "could not inspect selected kit {}: {error}",
+                    directory.display()
+                )
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                format!(
+                    "could not inspect selected kit {}: {error}",
+                    directory.display()
+                )
+            })?;
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                format!(
+                    "could not inspect selected kit file {}: {error}",
+                    path.display()
+                )
+            })?;
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "selected kit contains a symbolic link, which is not allowed in the trusted contract: {}",
+                    path.display()
+                ));
+            }
+            if metadata.is_dir() {
+                visit(&path, files)?;
+            } else if metadata.is_file() {
+                files.push(path);
+            } else {
+                return Err(format!(
+                    "selected kit contains a non-regular file: {}",
+                    path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    visit(root, &mut files)?;
+    if !files.iter().any(|path| path == &root.join("spec.yaml")) {
+        return Err(format!("selected kit has no spec.yaml: {}", root.display()));
+    }
+    Ok(files)
 }
 
 fn append_contract_part(input: &mut Vec<u8>, part: &[u8]) {
@@ -760,18 +910,22 @@ mod tests {
             path: PathBuf::from("/work/project with spaces"),
             name: "rust-multi-project".to_owned(),
             review_name: "rust-review-project".to_owned(),
+            isolated_name: "rust-isolated-project".to_owned(),
         };
+        let profile = Profile::default();
         let development = render(
             &context,
             &project,
             Kind::Development(Preset::MultiAgent),
             None,
+            &profile,
         )
         .unwrap();
         assert!(development.contains("/trusted/kits/claude-cli"));
         assert!(development.contains("/trusted/kits/pi-cli"));
         assert!(!development.contains("codex-cli"));
-        assert!(!development.contains("secret"));
+        assert!(development.contains("secrets:\n  github:"));
+        assert!(!development.contains("ghp_"));
         assert!(development.contains("agent: \"sbxr-multi-agent\""));
         assert!(development.contains("bindings:\n  openai:\n    oauth:"));
         assert!(development.contains("- auth.openai.com"));
@@ -781,15 +935,22 @@ mod tests {
         assert!(development.contains("- api.anthropic.com"));
         assert!(development.contains("\"/work/project with spaces\""));
 
-        let review = render(&context, &project, Kind::Review, None).unwrap();
+        let review = render(&context, &project, Kind::Review, None, &profile).unwrap();
         assert!(review.contains("agent: \"shell\""));
         assert!(review.contains("clone: true"));
         assert!(!review.contains("github-ssh"));
         assert!(!review.contains("claude-cli"));
         assert!(!review.contains("bindings:"));
 
-        let codex = render(&context, &project, Kind::Development(Preset::Codex), None).unwrap();
-        assert!(!codex.contains("bindings:"));
+        let codex = render(
+            &context,
+            &project,
+            Kind::Development(Preset::Codex),
+            None,
+            &profile,
+        )
+        .unwrap();
+        assert!(codex.contains("bindings:"));
     }
 
     #[test]
@@ -825,6 +986,7 @@ mod tests {
             "host-shell",
             "git-ssh-sign",
             "github-ssh",
+            "github-proxy-codex",
             "paseo-cli",
             "vscode-remote",
         ] {
@@ -841,6 +1003,7 @@ mod tests {
             &context,
             Kind::Development(Preset::Codex),
             None,
+            &Profile::default(),
             b"definition",
         )
         .unwrap();
@@ -853,10 +1016,34 @@ mod tests {
             &context,
             Kind::Development(Preset::Codex),
             None,
+            &Profile::default(),
             b"definition",
         )
         .unwrap();
         assert_ne!(before, after);
+        let asset = context
+            .kit_root
+            .join("rust/files/opt/sbxr-tools/package-lock.json");
+        fs::create_dir_all(asset.parent().unwrap()).unwrap();
+        fs::write(&asset, b"locked-v1").unwrap();
+        let with_asset = contract_hash(
+            &context,
+            Kind::Development(Preset::Codex),
+            None,
+            &Profile::default(),
+            b"definition",
+        )
+        .unwrap();
+        fs::write(&asset, b"locked-v2").unwrap();
+        let changed_asset = contract_hash(
+            &context,
+            Kind::Development(Preset::Codex),
+            None,
+            &Profile::default(),
+            b"definition",
+        )
+        .unwrap();
+        assert_ne!(with_asset, changed_asset);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -924,8 +1111,18 @@ mod tests {
             path: workspace,
             name: "sandbox".to_owned(),
             review_name: "review".to_owned(),
+            isolated_name: "isolated".to_owned(),
         };
-        assert!(materialize(&context, &project, Kind::Development(Preset::Codex), None).is_err());
+        assert!(
+            materialize(
+                &context,
+                &project,
+                Kind::Development(Preset::Codex),
+                None,
+                &Profile::default()
+            )
+            .is_err()
+        );
         assert!(!state_root.exists());
         fs::remove_dir_all(root).unwrap();
     }
@@ -945,6 +1142,7 @@ mod tests {
             "host-shell",
             "git-ssh-sign",
             "github-ssh",
+            "github-proxy-codex",
             "paseo-cli",
             "vscode-remote",
         ] {
@@ -961,9 +1159,16 @@ mod tests {
             path: workspace,
             name: "sandbox".to_owned(),
             review_name: "review".to_owned(),
+            isolated_name: "isolated".to_owned(),
         };
-        let definition =
-            materialize(&context, &project, Kind::Development(Preset::Codex), None).unwrap();
+        let definition = materialize(
+            &context,
+            &project,
+            Kind::Development(Preset::Codex),
+            None,
+            &Profile::default(),
+        )
+        .unwrap();
         let directory_mode = fs::metadata(definition.path().parent().unwrap())
             .unwrap()
             .permissions()
@@ -1003,12 +1208,19 @@ mod tests {
             path: workspace,
             name: "sandbox".to_owned(),
             review_name: "review".to_owned(),
+            isolated_name: "isolated".to_owned(),
         };
-        let inspection =
-            inspect(&context, &project, Kind::Development(Preset::Codex), None).unwrap();
+        let inspection = inspect(
+            &context,
+            &project,
+            Kind::Development(Preset::Codex),
+            None,
+            &Profile::default(),
+        )
+        .unwrap();
         assert_eq!(inspection.source, "prospective (not written)");
         assert!(inspection.contract_status.starts_with("not materialized"));
-        assert!(inspection.yaml.contains("agent: \"codex\""));
+        assert!(inspection.yaml.contains("agent: \"sbxr-codex-github\""));
         assert!(!context.state_root.exists());
         fs::remove_dir_all(root).unwrap();
     }
@@ -1027,6 +1239,7 @@ mod tests {
             "host-shell",
             "git-ssh-sign",
             "github-ssh",
+            "github-proxy-codex",
             "paseo-cli",
             "vscode-remote",
         ] {
@@ -1043,12 +1256,25 @@ mod tests {
             path: workspace,
             name: "sandbox".to_owned(),
             review_name: "review".to_owned(),
+            isolated_name: "isolated".to_owned(),
         };
-        let definition =
-            materialize(&context, &project, Kind::Development(Preset::Codex), None).unwrap();
+        let definition = materialize(
+            &context,
+            &project,
+            Kind::Development(Preset::Codex),
+            None,
+            &Profile::default(),
+        )
+        .unwrap();
         definition.write_applied_host_record().unwrap();
-        let inspection =
-            inspect(&context, &project, Kind::Development(Preset::Codex), None).unwrap();
+        let inspection = inspect(
+            &context,
+            &project,
+            Kind::Development(Preset::Codex),
+            None,
+            &Profile::default(),
+        )
+        .unwrap();
         assert_eq!(inspection.source, "materialized");
         assert_eq!(
             inspection.contract_status,

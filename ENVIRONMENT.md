@@ -92,7 +92,36 @@ On Unix, `sbxr` protects directories with mode `0700` and files with `0600`,
 uses atomic replacement, and rejects symlinked authoritative path components
 and files. The
 generated environment contains paths and kit references but no OAuth tokens,
-private keys, literal secrets, or host secret commands.
+private keys, or literal secrets. GitHub/GHCR declarations may contain the
+fixed absolute host command `/usr/bin/gh auth token`; Docker executes it on the
+host and exposes only its proxy sentinel, never the command output, to guests.
+
+## Protected project profiles and direct options
+
+Optional settings are command-line/profile inputs rather than environment
+variables. They can appear before or after the command:
+
+```bash
+sbxr --wizard .
+sbxr --memory 8g --cpus 4 --browser new -y .
+sbxr --isolated --network restricted up -y .
+sbxr --config /trusted/team-profile.json up -y .
+```
+
+`--wizzard` is retained as a spelling alias for `--wizard`. Direct flags and
+the wizard save a validated version-1 JSON file below
+`$SBXR_STATE_ROOT/profiles`. Allowed settings are `workspace`, `network`,
+`githubProxy: true`, `integrations.browser`, `integrations.orca`,
+`integrations.ghcr`, and `resources.memory/cpus/rootDisk/dockerDisk`. Unknown
+keys, secret-looking keys, malformed types, unsafe sizes, excessive CPU/memory,
+and unsafe disk budgets are rejected. External `--config` files are parsed
+with the same schema and copied into protected state; profiles must never
+contain credentials.
+
+`--root-disk` and `--docker-disk` are passed to Docker Sandboxes only for the
+environment lifecycle command. Memory and CPU limits are declared in the
+environment file. All four values are contract inputs and require explicit
+recreation when changed.
 
 ## Optional RocksDB acceleration
 

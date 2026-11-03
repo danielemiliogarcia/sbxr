@@ -69,6 +69,13 @@ The default `rust-multi-agent` preset combines:
 - pinned Pi, connected to the Docker-managed Codex and Claude OAuth proxies;
 - the pinned Paseo CLI and a loopback-only Paseo daemon that host Paseo clients
   reach over the sandbox SSH transport;
+- committed npm lockfiles for Claude, Pi, and Paseo; installation uses
+  `npm ci --ignore-scripts` so transitive resolution cannot drift during the
+  first sandbox bootstrap;
+- GitHub HTTPS/API access through Docker's host credential proxy, with only a
+  non-reusable sentinel in the guest; forwarded GitHub SSH remains available;
+- protected per-project profiles, redacted diagnostic reports, and staged
+  bootstrap checkpoints;
 - VS Code Remote-SSH, including version-matched host extension installation;
 - GitHub SSH push/pull and host-policy-matched SSH commit signing through
   Docker's forwarded host SSH agent;
@@ -103,9 +110,17 @@ orchestration.
 | `sbxr claude .` | Run Claude Code |
 | `sbxr pi .` | Run Pi in the multi-agent preset |
 | `sbxr paseo .` | Start the sandbox Paseo daemon and print its SSH URL |
+| `sbxr orca .` | Enable/start optional Orca Server and print its Desktop pairing URL |
+| `sbxr isolated .` | Open a long-lived clone-mode sandbox with no writable host workspace mount |
+| `sbxr wizard .` | Interactively configure optional integrations/resources, save, and open |
+| `sbxr profile .` | Print the protected nonsecret profile |
 | `sbxr auth-import .` | Explain why legacy credential imports are disabled |
 | `sbxr auth-status .` | Check Codex, Claude, and Pi provider status |
 | `sbxr audit .` | Run cargo-audit, cargo-deny, and cargo-vet if configured |
+| `sbxr verify .` | Audit runtime identity, guest credentials, tools, and SSH forwarding |
+| `sbxr commit-pgp-sign .` | OpenPGP-sign the current commit on the host |
+| `sbxr commit-pgp-sign --all-mine .` | Sign your unsigned commits ahead of the upstream |
+| `sbxr commit-pgp-sign --range BASE..HEAD .` | Sign your unsigned commits in an explicit range |
 | `sbxr review .` | No-OAuth, clone-mode review sandbox |
 | `sbxr inspect .` | Show the protected environment declaration and contract state |
 | `sbxr name .` | Print the deterministic name |
@@ -114,13 +129,35 @@ orchestration.
 | `sbxr rm .` | Remove sandbox-local state; host files remain |
 | `sbxr rm --force .` | Remove even while VS Code/SSH is connected |
 | `sbxr setup` | Configure missing Docker login, OpenAI OAuth, and Remote-SSH |
-| `sbxr doctor` | Run the complete read-only host diagnostic |
+| `sbxr doctor [PATH]` | Diagnose the host; with a project compare host/guest versions |
 | `sbxr --version` | Print the installed sbxr version |
 
 `-y`, `--yes-to-all`, and `--force` are equivalent. On commands that may create
 or start a sandbox, they pass `--force` to `sbx env run` and skip Docker's
 environment-plan approval prompt. On `sbxr rm`, they pass `--force` to
-`sbx env rm`. They do not copy credentials or perform a missing OAuth login.
+`sbx env rm`. On multi-commit `commit-pgp-sign`, they approve the printed
+history-rewrite plan but do not suppress GPG/YubiKey interaction. They do not
+copy credentials or perform a missing OAuth login.
+
+Normal launch keeps the opinionated defaults: shared host workspace, the
+multi-agent Rust environment, development networking, host-proxied GitHub,
+forwarded SSH, and the existing editor/shell integrations. Browser, Orca,
+GHCR, isolated mode, and tighter network profiles are opt-in. Run `sbxr wizard
+.` only when you want to choose them interactively, or use direct flags:
+
+```bash
+sbxr --browser --memory 8g --cpus 4 new -y .
+sbxr --network restricted up -y .
+sbxr --ghcr up -y .
+```
+
+Selections are validated and saved as nonsecret JSON under the protected sbxr
+state directory. They become part of the environment contract; changing a
+creation-time selection requires the explicit `sbxr rm`/`new` sequence printed
+by sbxr. `development` retains ordinary kit and project egress. `restricted`
+blocks package/toolchain download hosts after bootstrap, and `offline` blocks
+all sandbox egress after bootstrap. Both policies are scoped to that sandbox;
+sbxr never resets host-global policy.
 
 ## Git inside or outside the sandbox
 
@@ -131,8 +168,9 @@ side; do not run competing Git mutations on both sides at the same time.
 On first bootstrap, `sbxr` installs `nano` as Git's editor, enables Bash/Git
 completion, mirrors the host's global `user.name` and `user.email`, installs
 GitHub's published SSH host keys, and permits GitHub SSH traffic. Docker
-Sandboxes automatically forwards signing and authentication requests to the
-host agent, so private SSH keys are not copied into the microVM. See Docker's
+Sandboxes automatically forwards SSH authentication and SSH-format signing
+requests to the host agent, so private SSH keys are not copied into the
+microVM. See Docker's
 [Git sandbox workflow and signing
 model](https://docs.docker.com/ai/sandboxes/workflows/git/).
 If the host's `SSH_AUTH_SOCK` is stale, `sbxr` automatically selects a live
@@ -158,8 +196,47 @@ still requests the mirrored format and fails when its signer is unavailable.
 Register an SSH public key with GitHub as a signing key when using SSH signing
 and GitHub's **Verified** badge is required.
 
-Only GitHub SSH is allowed by the bundled policy. Other Git hosts need their
-own reviewed network/known-host kit. Any process in a connected sandbox can ask
+For an OpenPGP/GPG YubiKey, create the commit in the sandbox and sign it from
+the host-mounted checkout:
+
+```bash
+sbxr commit-pgp-sign .
+```
+
+The command refuses staged changes or an in-progress merge/rebase operation,
+disables repository Git hooks for the signing-only amend, forces Git's OpenPGP
+backend, and verifies that the resulting `HEAD` contains an OpenPGP signature.
+Git invokes the host GPG agent, so the YubiKey, PIN entry, touch confirmation,
+and private key remain on the host. Unstaged and untracked files are preserved.
+
+To sign a linear suffix of unpublished commits authored with the repository's
+effective `user.email`, use:
+
+```bash
+sbxr commit-pgp-sign --all-mine .
+# Or, when there is no upstream or a narrower boundary is wanted:
+sbxr commit-pgp-sign --range origin/main..HEAD .
+```
+
+`--all-mine` examines only commits ahead of the current branch's upstream and
+starts at the earliest unsigned matching commit. Adding a signature changes a
+commit ID, so every descendant in that suffix is recreated and re-signed,
+including descendants that were already signed. History mode therefore
+requires a completely clean worktree, an attached branch, no merge/root commit
+in the rewritten suffix, and no differently authored descendant. Before the
+rewrite it prints every affected commit and asks for confirmation; `-y` skips
+that confirmation but never bypasses YubiKey PIN/touch prompts.
+
+sbxr creates a `refs/sbxr/commit-pgp-sign/...` recovery ref, disables project
+hooks, verifies the final tree and every resulting OpenPGP signature, and
+automatically aborts to the original branch if signing fails. It never pushes.
+If the old commits were already published, inspect the result carefully and
+run `git push --force-with-lease` yourself; this rewrite cannot be a
+fast-forward.
+
+GitHub HTTPS/API requests can use the Docker host proxy without exposing the
+host token, while GitHub SSH remains allowed for existing workflows. Other Git
+hosts need their own reviewed network/known-host kit. Any process in a connected sandbox can ask
 the forwarded SSH agent to authenticate or sign while that connection is
 alive; use an agent that confirms operations when this matters.
 
@@ -175,6 +252,17 @@ contract state, and YAML for the selected project, preset, and optional
 RocksDB configuration. Before the first sandbox creation it renders a
 prospective declaration in memory without writing it. After materialization it
 shows the authoritative file stored under protected host state.
+
+`sbxr verify` operates on an existing sandbox. It validates Docker's reported
+agent, selected kits, empty runtime-mount list, and workspace; audits known
+Codex, Claude, Pi, GitHub, Docker, and VS Code credential stores for reusable
+values; verifies pinned tool versions; and checks the forwarded SSH agent
+without printing public keys. It never scans project files or deletes findings.
+
+Lifecycle commands write a redacted JSON report under
+`$SBXR_STATE_ROOT/diagnostics`. Reports contain stage/status categories only:
+no arguments, project paths, environment, raw errors, command output, pairing
+links, or credential values.
 
 When the matching Remote-SSH window is open, `sbxr stop` asks that exact VS
 Code window to close normally and waits before stopping the microVM. This gives
@@ -221,6 +309,27 @@ transport does not install or start a remote daemon; `sbxr paseo` is what starts
 it. Agents Paseo launches there are the sandbox's own Claude, Codex, and Pi
 installations, with the sandbox's network policy and file access.
 
+## Optional browser and Orca integrations
+
+`--browser` installs the committed `@playwright/mcp` 0.0.83 lock and its exact
+Playwright/Chromium dependency inside a Codex-capable sandbox. npm lifecycle
+scripts remain disabled; Chromium is installed explicitly, uses a fresh
+in-memory profile for every MCP process, trusts only the sandbox proxy CA, and
+does not share host browser cookies or a control port. The integration is
+registered as `sbxr-browser` after trusted Codex configuration mirroring.
+
+`sbxr orca .` enables the optional Orca kit in the protected project profile,
+installs the checksum-pinned Orca 1.4.247 AppImage by extracting it without
+FUSE, starts `orca serve` as the unprivileged sandbox user, and prints its
+pairing URL. The server is published only to a deterministic host loopback
+port, and sbxr rewrites the endpoint embedded in the pairing payload to that
+published port. Paste the URL into Orca Desktop under **Settings → Remote Orca
+Servers → Add Server**. Treat the pairing URL as a secret and do not publish
+the loopback port through a public tunnel.
+
+Both integrations are disabled by default and become creation-time contract
+inputs when enabled.
+
 ## Why `sbxr`? From project folder to agent-ready Rust IDE
 
 Docker Sandboxes provides the secure microVM and the flexible `sbx` building
@@ -248,6 +357,9 @@ That ready-to-code experience includes:
 - ChatGPT and Claude subscription OAuth workflows without requiring API keys;
 - a pinned Rust toolchain plus `rustfmt`, Clippy, Rust Analyzer, LLDB, and Cargo
   supply-chain tools such as `cargo-audit`, `cargo-deny`, and `cargo-vet`;
+- automatic installation/selection of requested `rust-toolchain.toml` or
+  `rust-toolchain` toolchains and components, including nested repositories in
+  a multi-project workspace;
 - a local-like Rust editing experience in VS Code: remote Rust Analyzer powers
   completion, diagnostics, hover information, find references, go to
   definition, and source navigation across the project and available imported
@@ -550,6 +662,8 @@ mirror them from a trusted host profile.
 - `src/main.rs`: minimal process entrypoint and module wiring;
 - `src/app.rs`: top-level command dispatch;
 - `src/cli.rs`: argument parsing, presets, actions, and help text;
+- `src/profile.rs`: protected profiles, resource validation, and wizard;
+- `src/diagnostics.rs`: redacted structured reports;
 - `src/environment.rs`: runtime context, project identity, sandbox names, and
   optional host RocksDB validation;
 - `src/envfile.rs`: protected declarative environments and desired/applied
@@ -560,6 +674,12 @@ mirror them from a trusted host profile.
 - `src/host.rs`: setup, preflight checks, and diagnostics;
 - `src/auth.rs`: credential-import offer, explicit import, and subscription
   status;
+- `src/sign.rs`: host-only OpenPGP commit signing;
+- `src/verify.rs`: redacted runtime and guest-credential verification;
+- `src/node_tools.rs`: embedded lockfile upload, exact Node-tool installation,
+  and installation-state hashing;
+- `src/github_proxy.rs`, `src/browser.rs`, and `src/orca.rs`: optional/default
+  integration bootstrap without host credential copies;
 - `kits/`: embedded declarative sandbox mixins, including `host-shell` for the
   mirrored host aliases and `~/bin` PATH hook and `paseo-cli` for the pinned
   Paseo CLI and its loopback-only daemon;

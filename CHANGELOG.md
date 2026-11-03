@@ -2,6 +2,97 @@
 
 ## Unreleased
 
+## [0.3.0] - 2026-11-03
+
+### Added
+
+- Added protected, validated, nonsecret per-project profiles plus opt-in
+  `--wizard`/`--wizzard`. Normal `sbxr new -y` keeps the fast current defaults.
+- Added shared/development defaults with optional mountless `isolated` clone
+  mode; `development`, `restricted`, and `offline` sandbox-scoped network
+  profiles; and checked memory, CPU, root-disk, and Docker-disk overrides.
+- Added host-proxied GitHub HTTPS/API authentication by default while retaining
+  SSH-agent forwarding. Optional GHCR registry credentials are also proxied by
+  Docker and never copied into the guest.
+- Added the optional lockfile-pinned Playwright MCP with an isolated Chromium
+  profile and the optional checksum-pinned Orca 1.4.247 server. `sbxr orca`
+  starts it and prints the private Orca Desktop pairing link.
+- Added redacted structured diagnostic reports, per-stage bootstrap markers,
+  exact pinned-tool verification, selected-kit/runtime-mount checks, and
+  `sbxr doctor PATH` host-versus-sandbox version reporting.
+- Rust toolchain reconciliation now discovers nested repositories in a
+  multi-project workspace before Rust Analyzer or other editor tools start.
+
+### Security
+
+- Docker receives GitHub/GHCR host commands only from protected launcher state;
+  guests receive proxy sentinels. The guest audit rejects reusable GitHub,
+  provider, Docker, editor, and agent credentials without printing values.
+- Optional browser packages use a committed lockfile and `npm ci
+  --ignore-scripts`; Chromium uses an ephemeral profile, the sandbox proxy,
+  and the proxy CA without sharing host browser state.
+- Profiles and diagnostics use atomic `0600` files below protected `0700` host
+  directories and reject secret-looking or unknown profile fields.
+
+### Changed
+
+- Bumped `sbxr` to 0.3.0. The shared workspace, current integrations, broad
+  development network, and forwarded SSH agent remain the defaults.
+
+## [0.2.7] - 2026-11-03
+
+### Added
+
+- `sbxr commit-pgp-sign --all-mine [PATH]` now signs the current author's
+  unsigned commits ahead of the branch upstream. `--range BASE..HEAD` provides
+  an explicit boundary for branches without an upstream or for a narrower
+  rewrite.
+
+### Security
+
+- History signing requires a clean, attached, linear branch suffix owned by
+  the effective Git `user.email`. It prints the non-fast-forward plan, requires
+  confirmation unless `-y` is supplied, disables repository hooks, creates a
+  recovery ref, verifies every rewritten OpenPGP signature and the final tree,
+  and never pushes. A failed signing operation automatically aborts the rebase
+  back to the original branch.
+
+### Changed
+
+- Bumped `sbxr` to 0.2.7. SSH-agent forwarding remains enabled and unchanged.
+
+## [0.2.6] - 2026-11-03
+
+### Added
+
+- Added `sbxr commit-pgp-sign [PATH]`, which performs a host-only,
+  hook-disabled signing-only amend using Git's OpenPGP backend. This supports
+  host GPG agents and OpenPGP YubiKeys without forwarding the USB device or
+  private key into the sandbox.
+- Added `sbxr verify [PATH]`, a read-only audit of an existing sandbox's
+  runtime identity, shared workspace, supported credential stores, installed
+  tool versions, and forwarded SSH-agent availability. Findings identify
+  locations without printing credential values.
+- Projects with `rust-toolchain.toml` or `rust-toolchain` now automatically
+  install/select that requested toolchain before agent and editor bootstrap.
+
+### Security
+
+- Claude, Pi, and Paseo are now installed with per-kit committed npm
+  lockfiles and `npm ci --ignore-scripts`. Narrow transitive overrides remove
+  the advisories present in a fresh registry resolution; all locked packages
+  passed npm registry-signature verification.
+- Pi's managed Codex and Anthropic entries are reasserted as Docker proxy
+  sentinels on launch, and the guest credential audit recognizes Pi's
+  `access`/`refresh` OAuth field names.
+- Environment contract hashes now cover every regular file in each selected
+  kit, including package manifests and lockfiles, and reject symbolic or
+  non-regular kit content.
+
+### Changed
+
+- Bumped `sbxr` to 0.2.6. SSH-agent forwarding remains enabled and unchanged.
+
 ## [0.2.5] - 2026-11-02
 
 ### Fixed

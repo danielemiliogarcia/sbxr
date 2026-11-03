@@ -1,16 +1,24 @@
 mod app;
 mod auth;
+mod browser;
 mod cli;
+mod diagnostics;
 mod embedded;
 mod envfile;
 mod environment;
 mod git;
+mod github_proxy;
 mod host;
+mod node_tools;
+mod orca;
 mod process;
+mod profile;
 mod sandbox;
 mod sbx;
 mod sha256;
+mod sign;
 mod sync;
+mod verify;
 mod vscode;
 
 fn main() {

@@ -72,6 +72,8 @@ The binary is deliberately split by responsibility:
 | `main.rs` | Minimal process entrypoint and module wiring |
 | `app.rs` | Top-level command dispatch and workflow coordination |
 | `cli.rs` | Argument parsing, presets, actions, and help text |
+| `profile.rs` | Validated protected project profiles, wizard, and host resource checks |
+| `diagnostics.rs` | Redacted structured lifecycle reports |
 | `environment.rs` | Project identity, deterministic names, data/state paths, and RocksDB validation |
 | `envfile.rs` | Protected `.sbxenv.yaml` generation, atomic state files, and environment-contract guards |
 | `sbx.rs` | The only Docker Sandboxes CLI construction/version/schema boundary |
@@ -79,6 +81,12 @@ The binary is deliberately split by responsibility:
 | `sandbox.rs` | Declarative development/review orchestration, remote commands, and Cargo audits |
 | `host.rs` | Setup, action-specific preflight, and `doctor` diagnostics |
 | `auth.rs` | Credential-import offer, explicit import, and subscription status |
+| `sign.rs` | Host-only OpenPGP commit signing without project hook execution |
+| `verify.rs` | Existing-sandbox runtime, credential, tool, and SSH-agent audit |
+| `node_tools.rs` | Embedded lockfile delivery, exact Node-tool installation, and hash-checked reuse |
+| `github_proxy.rs` | Checksum-pinned guest gh plus sentinel-only HTTPS credential helper |
+| `browser.rs` | Optional Playwright MCP registration |
+| `orca.rs` | Optional checksum-pinned Orca headless install and pairing |
 | `vscode.rs` | Remote-SSH launch and VS Code extension mirroring |
 | `sync.rs` | Agent configuration selection/transfer and persistent bootstrap state |
 | `embedded.rs` | Compile-time inclusion and materialization of kit specifications |
@@ -90,7 +98,8 @@ in the module that owns the concept. Create another cohesive module when a
 feature introduces a genuinely new responsibility; do not split code solely
 to reduce line counts.
 
-The specifications under `kits/` are embedded into the executable. They may
+The specifications and declared file assets under `kits/` are embedded into
+the executable. They may
 contain Linux provisioning commands that run inside a sandbox. The host
 launcher itself remains pure Rust and must not depend on companion shell
 scripts.
@@ -141,6 +150,19 @@ For a change to an existing kit, edit its `kits/<name>/spec.yaml`. If adding or
 removing a kit, also update both lists in `src/embedded.rs`: the embedded
 content table and the kit-name validation list.
 
+Claude, Pi, and Paseo package manifests and lockfiles live below each kit's
+`files/opt/sbxr-tools/` tree. Update an exact top-level version intentionally,
+regenerate with `npm install --package-lock-only --ignore-scripts`, review the
+complete lockfile diff and overrides, then run `npm audit` and
+`npm audit signatures`. Do not use `npm audit fix --force` or accept an
+unreviewed major override merely to obtain a clean report.
+
+Docker kits do not automatically install arbitrary files from that tree.
+`src/embedded.rs` carries the files in the sbxr executable and
+`src/node_tools.rs` uploads them during post-create bootstrap, runs `npm ci`
+inside the microVM, and records a hash covering the manifests, locks, and
+installation logic. A changed hash reinstalls the selected tools on reuse.
+
 Validate affected kits with the installed Docker Sandboxes CLI:
 
 ```bash
@@ -151,12 +173,19 @@ sbx kit validate kits/pi-cli
 sbx kit validate kits/paseo-cli
 sbx kit validate kits/git-ssh-sign
 sbx kit validate kits/github-ssh
+sbx kit validate kits/github-proxy-codex
+sbx kit validate kits/github-proxy-claude
+sbx kit validate kits/ghcr
+sbx kit validate kits/browser
+sbx kit validate kits/orca-server
 ```
 
 Run validation for every changed kit. A syntax-valid kit can still fail during
 installation, so provisioning changes also require a live creation test.
-Remember that kits are applied when a sandbox is created; reusing an old
-sandbox does not retest changed installation commands.
+Remember that kit setup commands are applied when a sandbox is created;
+reusing an old sandbox does not retest those commands. The separately hashed
+Node-tool bootstrap is reconciled on every sbxr launch and reruns only when its
+inputs or expected executables change.
 
 Kit security changes deserve explicit review. Pay particular attention to:
 

@@ -8,8 +8,9 @@ not certify dependencies, extensions, or agent output as safe.
 - Builds, build scripts, procedural macros, tests, binaries, and agents run in
   a project-specific microVM rather than directly on the host.
 - Projects receive separate persistent Cargo caches.
-- Global `deny-all` plus kit-declared endpoints blocks and logs undeclared
-  outbound hosts.
+- Kit-declared endpoints describe required provisioning/runtime destinations.
+  Optional `restricted` and `offline` profiles add sandbox-scoped deny rules
+  after bootstrap without modifying host-global policy.
 - Review mode mounts a clone rather than a writable host checkout, provides no
   agent OAuth, and does not mirror the host VS Code extension set.
 - Authoritative `.sbxenv.yaml` files live in protected host state outside every
@@ -18,23 +19,36 @@ not certify dependencies, extensions, or agent output as safe.
 - Desired/applied contract markers prevent Docker from silently reusing a
   legacy or externally recreated same-name sandbox with stale creation-time
   workspaces, kits, ports, or options. The hash includes the generated
-  environment and every selected embedded kit specification.
+  environment and every regular file in each selected embedded kit, including
+  Node package manifests and lockfiles; links and non-regular kit files are
+  rejected.
 - Toolchains and agents are pinned; available bootstrap artifacts are checksum
-  verified.
+  verified. Claude, Pi, and Paseo use committed npm lockfiles and install with
+  lifecycle scripts disabled.
 - The launcher's only direct crate dependency is exact-pinned. Its complete
   locked dependency closure is vendored, and path installation can compile it
   with `cargo install --frozen --path .` and no registry access. Executed build
   scripts and package checksums are recorded in `THIRD_PARTY_REVIEW.md`. This
   addresses the bootstrap chicken-and-egg problem: installing the isolation
   launcher does not first fetch a newly resolved dependency graph.
-- Docker's credential proxy keeps the real ChatGPT and Claude OAuth tokens
-  outside the VM. Codex, Claude, and Pi receive only host-scoped sentinels.
+- Docker's credential proxy keeps the real ChatGPT, Claude, and GitHub tokens
+  outside the VM. Codex, Claude, Pi, Git/gh, and optional GHCR access receive
+  only host-scoped sentinels or proxy-injected requests.
+  Each sbxr launch reasserts Pi's managed provider entries, so guest login
+  state cannot persistently replace those sentinels with reusable OAuth values.
 - GitHub authentication and enabled or explicitly requested SSH signing use
   Docker's forwarded host SSH agent; private SSH keys are not copied into the
   VM. Automatic commit/tag signing follows the host project's effective Git
   defaults only when its signing format is SSH.
 - Safe config mirroring excludes credential, history, session, log, project
   trust, and runtime-state files.
+- Validated project profiles are nonsecret, reject unknown and secret-looking
+  fields, and use protected atomic host files. Structured diagnostic reports
+  exclude arguments, paths, environment, raw errors, output, and secret links.
+- The optional browser MCP is lockfile-pinned, installs with npm lifecycle
+  scripts disabled, uses an ephemeral profile and sandbox proxy CA, and shares
+  no host browser state. Orca is checksum-pinned and binds through host
+  loopback only.
 
 ## Limits
 
@@ -43,6 +57,8 @@ not certify dependencies, extensions, or agent output as safe.
 - Allowed registries, GitHub, agent, npm, and VS Code hosts remain reachable;
   hostname allowlisting cannot validate every object served by them.
 - Direct mode lets sandbox code modify the selected project and `.git`.
+- Clone-mode `isolated` removes that writable host workspace mount, but its
+  sandbox-local clone is not a replacement for reviewed backups or pushes.
 - Sandbox-local caches, agent history/login state, tool installations, and
   remote-editor state are disposable. `sbxr` never silently recreates a
   mismatched sandbox, but explicit `rm`/recreation permanently discards them;
@@ -50,9 +66,20 @@ not certify dependencies, extensions, or agent output as safe.
 - While an SSH/Remote-SSH connection is active, any sandbox process can ask the
   forwarded host SSH agent to authenticate or sign. Agent confirmation and
   least-privilege Git keys remain important.
+- GitHub HTTPS/API and GHCR proxying prevents token extraction, but it does not
+  prevent an agent from using the host credential for allowed GitHub actions.
+  Keep scopes minimal and review pushes, releases, and package operations.
 - Docker does not forward OpenPGP/GPG, YubiKey GPG, or S/MIME signers. When the
   host requires one, `sbxr` warns and disables automatic sandbox signing;
   sandbox commits are unsigned and must be signed or re-signed on the host.
+  `sbxr commit-pgp-sign` performs that amend through host Git/GPG with project
+  hooks disabled, refuses staged changes and in-progress Git operations, and
+  confirms that the new commit contains an OpenPGP signature.
+- Multi-commit OpenPGP signing necessarily rewrites history. sbxr restricts it
+  to a clean, linear, same-author suffix, creates a recovery ref, disables
+  hooks, verifies the unchanged final tree and every new signature, and aborts
+  automatically on signing failure. It does not push rewritten history;
+  publishing it remains an explicit `git push --force-with-lease` decision.
 - Normal development windows disable VS Code Workspace Trust for that session
   because the microVM is the execution boundary; clone-mode `review` windows
   retain Workspace Trust.
@@ -61,6 +88,11 @@ not certify dependencies, extensions, or agent output as safe.
   credential files into the VM or bridges real tokens between Claude and Pi.
 - Mirrored hooks, plugins, skills, prompts, and VS Code extensions execute code
   and expand the trusted computing base.
+- `development` networking is intentionally comfortable rather than offline.
+  A malicious dependency can use allowed destinations, and code already
+  present needs no network. Select `restricted` or `offline` only after the
+  needed toolchain/integrations are provisioned; later downloads then require
+  a profile change and explicit recreation.
 - The recognized `rtk hook claude` executable is copied from the trusted host
   and version-checked. Desktop-audio hooks are omitted quietly because the VM
   has no host audio session. Other simple Claude hooks whose leading executable
@@ -117,7 +149,9 @@ not certify dependencies, extensions, or agent output as safe.
    the real OAuth tokens behind the host proxy; never paste or copy tokens into
    the sandbox.
 9. Inspect blocked egress with `sbx policy log "$(sbxr name)"`.
-10. Remove a suspected sandbox with `sbxr rm` rather than reusing its
+10. Run `sbxr verify` to check managed credential stores and runtime identity
+    without printing credential values.
+11. Remove a suspected sandbox with `sbxr rm` rather than reusing its
     caches. Sandbox-local deletion is irreversible; host project files remain.
 
 No policy makes unknown code risk-free. Combine isolation with least-privilege

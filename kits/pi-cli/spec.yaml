@@ -36,23 +36,6 @@ setup:
 
     - command: |
         set -euo pipefail
-        if [ -n "${HTTP_PROXY:-}" ]; then npm config set proxy "$HTTP_PROXY"; fi
-        if [ -n "${HTTPS_PROXY:-}" ]; then npm config set https-proxy "$HTTPS_PROXY"; fi
-        node -e '
-          const [major, minor] = process.versions.node.split(".").map(Number);
-          if (major < 22 || (major === 22 && minor < 19)) {
-            throw new Error(`Pi 1.4.0 requires Node >=22.19.0; found ${process.version}`);
-          }
-        '
-        if ! pi --version 2>/dev/null | grep -Fq '1.4.0'; then
-          npm install -g --ignore-scripts --no-audit --no-fund @earendil-works/pi-coding-agent@1.4.0
-        fi
-        pi --version
-      user: "1000"
-      description: Install pinned Pi without lifecycle scripts
-
-    - command: |
-        set -euo pipefail
         mkdir -p /home/agent/.pi/agent
         if [ ! -f /home/agent/.pi/agent/settings.json ]; then
           printf '%s\n' '{"defaultProjectTrust":"never","enableInstallTelemetry":false}' > /home/agent/.pi/agent/settings.json
@@ -60,73 +43,6 @@ setup:
         fi
       user: "1000"
       description: Disable telemetry and default project-local extensions to untrusted
-
-    - command: |
-        set -euo pipefail
-        PREFIX=$(npm config get prefix)
-        PACKAGE="$PREFIX/lib/node_modules/@earendil-works/pi-coding-agent"
-        node - "$PACKAGE" <<'NODE'
-        const fs = require("fs");
-        const path = require("path");
-        const packageDir = process.argv[2];
-        const targets = [
-          path.join(packageDir, "node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js")
-        ];
-        const chunks = path.join(packageDir, "dist/bundle/chunks");
-        for (const file of fs.readdirSync(chunks)) {
-          if (file.startsWith("openai-codex-responses-") && file.endsWith(".js")) {
-            targets.push(path.join(chunks, file));
-          }
-        }
-        for (const target of targets) {
-          let source = fs.readFileSync(target, "utf8");
-          if (source.includes('token === "oai-oat01-proxy-managed"') ||
-              source.includes('token==="oai-oat01-proxy-managed"')) continue;
-          const replacements = [
-            [
-              "function extractAccountId(token) {\n    try {",
-              'function extractAccountId(token) {\n    if (token === "oai-oat01-proxy-managed") return "proxy-managed";\n    try {'
-            ],
-            [
-              "function extractAccountId(token){try{",
-              'function extractAccountId(token){if(token==="oai-oat01-proxy-managed")return"proxy-managed";try{'
-            ]
-          ];
-          const replacement = replacements.find(([original]) => source.includes(original));
-          if (!replacement) throw new Error(`Pi proxy patch target was not found in ${target}`);
-          source = source.replace(replacement[0], replacement[1]);
-          fs.writeFileSync(target, source);
-        }
-        NODE
-        node <<'NODE'
-        const fs = require("fs");
-        const path = "/home/agent/.pi/agent/auth.json";
-        let auth = {};
-        try { auth = JSON.parse(fs.readFileSync(path, "utf8")); } catch {}
-        if (!auth["openai-codex"] || auth["openai-codex"].type === "oauth") {
-          auth["openai-codex"] = {
-            type: "oauth",
-            access: "oai-oat01-proxy-managed",
-            refresh: "proxy-managed",
-            expires: 4102444800000,
-            accountId: "proxy-managed",
-            source: "docker-sbx-proxy"
-          };
-        }
-        if (!auth.anthropic || auth.anthropic.type === "oauth") {
-          auth.anthropic = {
-            type: "oauth",
-            access: "sk-ant-oat01-proxy-managed",
-            refresh: "sk-ant-ort01-proxy-managed",
-            expires: 4102444800000,
-            source: "docker-sbx-proxy"
-          };
-        }
-        fs.writeFileSync(path, JSON.stringify(auth, null, 2) + "\n", { mode: 0o600 });
-        fs.chmodSync(path, 0o600);
-        NODE
-      user: "1000"
-      description: Configure Pi for Docker host-managed ChatGPT and Claude OAuth without exposing either token
 
 volumes:
   - path: /home/agent/.pi/agent

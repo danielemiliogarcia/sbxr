@@ -15,6 +15,18 @@ pub(crate) fn import(
 }
 
 pub(crate) fn show_status(context: &Context, sandbox_name: &str, preset: Preset) {
+    println!("GitHub (Docker host-proxied sentinel; no reusable token in guest):");
+    let _ = sbx::exec_command(context.preserve_xdg_state)
+        .args([
+            sandbox_name,
+            "--",
+            "gh",
+            "auth",
+            "status",
+            "--hostname",
+            "github.com",
+        ])
+        .status();
     if preset.has_codex() {
         println!("Codex (Docker host-managed OAuth):");
         let _ = sbx::command(context.preserve_xdg_state)

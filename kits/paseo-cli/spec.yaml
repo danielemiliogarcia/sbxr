@@ -29,17 +29,6 @@ setup:
 
     - command: |
         set -euo pipefail
-        if [ -n "${HTTP_PROXY:-}" ]; then npm config set proxy "$HTTP_PROXY"; fi
-        if [ -n "${HTTPS_PROXY:-}" ]; then npm config set https-proxy "$HTTPS_PROXY"; fi
-        if ! paseo --version 2>/dev/null | grep -Fq '0.8.0'; then
-          npm install -g --ignore-scripts --no-audit --no-fund @getpaseo/cli@0.8.0
-        fi
-        paseo --version
-      user: "1000"
-      description: Install the pinned Paseo CLI without lifecycle scripts
-
-    - command: |
-        set -euo pipefail
         mkdir -p /home/agent/.paseo
         if [ ! -f /home/agent/.paseo/config.json ]; then
           cat > /home/agent/.paseo/config.json <<'PASEO_CONFIG'

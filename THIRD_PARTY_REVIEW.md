@@ -6,6 +6,49 @@ This document records the dependency intake review for `sbxr` 0.1.0. It
 is evidence of a version-specific review, not a guarantee that third-party
 code is vulnerability-free or non-malicious.
 
+## Sandbox Node toolchains
+
+Review update: 2026-11-03
+
+Claude Code 2.1.239, Pi 1.4.0, and Paseo 0.8.0 each have an independent,
+committed npm package lock under their kit. Keeping the locks separate avoids
+installing agents excluded by a selected preset. Sandbox provisioning uses
+`npm ci --ignore-scripts --no-audit --no-fund`; Claude's shipped native binary
+is linked explicitly instead of executing its lifecycle hook.
+
+Pi expects its OpenAI OAuth access value to be a JWT so it can derive an
+account ID. Docker deliberately exposes a non-secret proxy sentinel instead.
+After the integrity-checked install, sbxr applies a narrow, fail-closed patch
+to Pi's Codex provider that maps only the exact Docker sentinel to the fixed
+`proxy-managed` account ID. The bootstrap fails if both reviewed patch targets
+are not found; no general token parsing or endpoint behavior is changed.
+
+Fresh resolution exposed vulnerable transitive Pi and Paseo releases. The
+reviewed manifests constrain Pi's `undici` to 8.12.2 and `minimatch` to 11.0.1,
+and constrain Paseo's MCP SDK, AI SDK, Markdown parser, and UUID dependencies;
+the lock selects the non-vulnerable Hono server release permitted by Paseo's
+range. `npm audit --package-lock-only --omit=dev` reported zero vulnerabilities
+for all three final locks. Clean temporary `npm ci --ignore-scripts` installs
+reported the expected CLI versions. `npm audit signatures` verified registry
+signatures for all 2 Claude, 122 Pi, and 281 Paseo packages; Pi reported 37
+attestations and Paseo 42. Registry signatures establish package identity, not
+benign behavior, so every future lockfile diff and override remains subject to
+review.
+
+The optional browser kit adds a separate three-package lock: Playwright MCP
+0.0.83 and exact Playwright/Playwright Core
+1.64.0-alpha-1790635538000. The recorded npm SHA-512 integrity values match the
+published registry artifacts. Installation uses `npm ci --ignore-scripts`;
+system libraries and Chromium are installed by explicit reviewed commands.
+
+The GitHub proxy bootstrap downloads GitHub CLI 2.102.0 and verifies the
+published archive with architecture-specific SHA-256 values before installing
+only `gh`. The optional Orca bootstrap downloads release 1.4.247's x64 or arm64
+AppImage and verifies the release manifest SHA-512 before extraction. Neither
+artifact is executed on the host: both are downloaded and verified inside the
+microVM. Versions, URLs, checksums, and installation logic are environment
+contract inputs.
+
 ## Resolution and delivery
 
 - The only direct dependency is exactly `serde_json = "=1.0.151"`.

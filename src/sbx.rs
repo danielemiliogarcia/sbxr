@@ -1,4 +1,5 @@
 use crate::process;
+use crate::profile::Resources;
 use std::ffi::OsStr;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -128,6 +129,13 @@ pub(crate) fn list_json(preserve_xdg_state: bool) -> Result<Output, String> {
     .map_err(|error| format!("{error}\nRun `sbx login`, then `sbx diagnose`."))
 }
 
+pub(crate) fn inspect_json(preserve_xdg_state: bool, sandbox_name: &str) -> Result<Output, String> {
+    process::output_checked(
+        command(preserve_xdg_state).args(["inspect", sandbox_name, "--json"]),
+        "inspecting Docker sandbox runtime metadata",
+    )
+}
+
 pub(crate) fn sandbox_state(json: &[u8], wanted: &str) -> Result<Option<String>, String> {
     let document: serde_json::Value = serde_json::from_slice(json)
         .map_err(|error| format!("could not parse Docker sandbox list: {error}"))?;
@@ -168,8 +176,9 @@ pub(crate) fn env_ensure_up(
     definition: &Path,
     version: Version,
     force: bool,
+    resources: &Resources,
 ) -> Result<(), String> {
-    let mut command = env_run_command(preserve_xdg_state, definition, version, force);
+    let mut command = env_run_command(preserve_xdg_state, definition, version, force, resources);
     process::run_checked(&mut command, "creating or starting declarative sandbox")
 }
 
@@ -178,11 +187,18 @@ fn env_run_command(
     definition: &Path,
     version: Version,
     force: bool,
+    resources: &Resources,
 ) -> Command {
     let mut command = command(preserve_xdg_state);
     command.args(["env", "run", version.env_detach_flag()]);
     if force {
         command.arg("--force");
+    }
+    if let Some(size) = &resources.root_disk {
+        command.env("DOCKER_SANDBOXES_ROOT_SIZE", size);
+    }
+    if let Some(size) = &resources.docker_disk {
+        command.env("DOCKER_SANDBOXES_DOCKER_SIZE", size);
     }
     command.arg(definition);
     command
@@ -358,7 +374,13 @@ mod tests {
     #[test]
     fn forwards_force_to_declarative_environment_runs() {
         let version = Version::parse("sbx version v0.50.1").unwrap();
-        let command = env_run_command(true, Path::new("/tmp/project.sbxenv.yaml"), version, true);
+        let command = env_run_command(
+            true,
+            Path::new("/tmp/project.sbxenv.yaml"),
+            version,
+            true,
+            &Resources::default(),
+        );
         let arguments = command
             .get_args()
             .map(|argument| argument.to_string_lossy().into_owned())

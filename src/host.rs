@@ -123,6 +123,28 @@ pub(crate) fn setup(preset: Preset, preserve_xdg_state: bool) -> Result<(), Stri
         println!("{}", process::install_hint("git"));
     }
 
+    if process::command_exists("gh") {
+        let authenticated = Command::new("gh")
+            .args(["auth", "status", "--hostname", "github.com"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if authenticated {
+            println!("ok   GitHub CLI host authentication for the sandbox proxy");
+        } else {
+            println!("==> GitHub CLI is not authenticated; starting `gh auth login`");
+            if let Err(error) = process::run_checked(
+                Command::new("gh").args(["auth", "login", "--hostname", "github.com"]),
+                "GitHub CLI login",
+            ) {
+                failures.push(error);
+            }
+        }
+    } else {
+        failures.push(format!("gh is missing\n{}", process::install_hint("gh")));
+    }
+
     if cfg!(target_os = "linux") {
         if fs::OpenOptions::new()
             .read(true)
@@ -234,12 +256,27 @@ pub(crate) fn preflight(action: &Action) -> Result<(), String> {
 
 pub(crate) fn doctor(context: &Context, preset: Preset, rocksdb: Option<&RocksDbHost>) -> bool {
     let mut healthy = true;
-    for tool in ["sbx", "code", "ssh", "git"] {
+    for tool in ["sbx", "code", "ssh", "git", "gh"] {
         if process::command_exists(tool) {
             println!("ok   {tool}");
         } else {
             println!("FAIL {tool} is missing");
             println!("{}", process::install_hint(tool));
+            healthy = false;
+        }
+    }
+
+    if process::command_exists("gh") {
+        let ok = Command::new("gh")
+            .args(["auth", "status", "--hostname", "github.com"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if ok {
+            println!("ok   host GitHub authentication for proxy-managed HTTPS/API access");
+        } else {
+            println!("FAIL GitHub CLI is not authenticated; run `gh auth login`");
             healthy = false;
         }
     }

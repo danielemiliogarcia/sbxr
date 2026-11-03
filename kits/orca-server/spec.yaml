@@ -1,0 +1,27 @@
+schemaVersion: "2"
+kind: mixin
+name: orca-server
+version: "1.4.247"
+displayName: Orca remote server
+description: Adds the optional checksum-pinned Orca headless runtime for connection from Orca Desktop.
+sourceURL: https://github.com/stablyai/orca
+
+security:
+  privileged: false
+
+permissions:
+  network:
+    allow:
+      - github.com:443
+      - release-assets.githubusercontent.com:443
+      - objects.githubusercontent.com:443
+      - archive.ubuntu.com:80
+      - security.ubuntu.com:80
+      - ports.ubuntu.com:80
+      - download.docker.com:443
+
+volumes:
+  - path: /home/agent/.config/orca
+    size: 2g
+  - path: /home/agent/.local/share/orca
+    size: 8g
