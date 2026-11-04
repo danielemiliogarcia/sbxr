@@ -40,7 +40,7 @@ impl Preset {
 
     pub(crate) fn primary_agent(self) -> &'static str {
         match self {
-            Self::MultiAgent => "sbxr-multi-agent",
+            Self::MultiAgent => "codex",
             Self::Codex => "codex",
             Self::Claude => "claude",
         }

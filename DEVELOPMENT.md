@@ -80,7 +80,7 @@ The binary is deliberately split by responsibility:
 | `git.rs` | Sandbox Git tooling, identity/signing-policy mirroring, GitHub access, and migration |
 | `sandbox.rs` | Declarative development/review orchestration, remote commands, and Cargo audits |
 | `host.rs` | Setup, action-specific preflight, and `doctor` diagnostics |
-| `auth.rs` | Credential-import offer, explicit import, and subscription status |
+| `auth.rs` | Disabled legacy import guidance, subscription status, and proxy-route verification |
 | `sign.rs` | Host-only OpenPGP commit signing without project hook execution |
 | `verify.rs` | Existing-sandbox runtime, credential, tool, and SSH-agent audit |
 | `node_tools.rs` | Embedded lockfile delivery, exact Node-tool installation, and hash-checked reuse |
@@ -150,12 +150,17 @@ For a change to an existing kit, edit its `kits/<name>/spec.yaml`. If adding or
 removing a kit, also update both lists in `src/embedded.rs`: the embedded
 content table and the kit-name validation list.
 
-Claude, Pi, and Paseo package manifests and lockfiles live below each kit's
+Pi and Paseo package manifests and lockfiles live below each kit's
 `files/opt/sbxr-tools/` tree. Update an exact top-level version intentionally,
 regenerate with `npm install --package-lock-only --ignore-scripts`, review the
 complete lockfile diff and overrides, then run `npm audit` and
 `npm audit signatures`. Do not use `npm audit fix --force` or accept an
 unreviewed major override merely to obtain a clean report.
+
+The Node runtime version and per-architecture archive digests live in
+`kits/node-runtime/spec.yaml`. Take digests only from the matching official
+Node.js release `SHASUMS256.txt`, verify both supported architectures, and
+update the security review with every runtime bump.
 
 Docker kits do not automatically install arbitrary files from that tree.
 `src/embedded.rs` carries the files in the sbxr executable and
@@ -167,17 +172,18 @@ Validate affected kits with the installed Docker Sandboxes CLI:
 
 ```bash
 sbx kit validate kits/rust
+sbx kit validate kits/node-runtime
 sbx kit validate kits/host-shell
-sbx kit validate kits/claude-cli
 sbx kit validate kits/pi-cli
 sbx kit validate kits/paseo-cli
 sbx kit validate kits/git-ssh-sign
 sbx kit validate kits/github-ssh
-sbx kit validate kits/github-proxy-codex
-sbx kit validate kits/github-proxy-claude
+sbx kit validate kits/github-proxy
 sbx kit validate kits/ghcr
 sbx kit validate kits/browser
 sbx kit validate kits/orca-server
+sbx kit validate kits/rocksdb-host
+sbx kit validate kits/vscode-remote
 ```
 
 Run validation for every changed kit. A syntax-valid kit can still fail during
@@ -232,9 +238,10 @@ Run live checks when changing sandbox lifecycle, kits, host preflight,
 authentication, configuration mirroring, VS Code, process invocation, or
 platform integration.
 
-The declarative refactor was verified against `sbx 0.39.0` on 2026-08-26.
-`sbxr` also accounts for the structured-output and flag changes introduced in
-`sbx 0.48.0`:
+The Kits v3 composition requires `sbx 0.51.0` or newer. The earlier
+declarative environment work was verified against `sbx 0.39.0`; sbxr retains
+the structured-output and flag compatibility introduced in `sbx 0.48.0`, but
+those older releases cannot load the current Kits v3 contract:
 
 - detached `sbx env run` created a fresh environment and reconciled a
   contract-matched existing one without opening an interactive shell;
@@ -299,6 +306,13 @@ Stop test sandboxes afterward while preserving their state:
 ```bash
 cargo run --frozen -- stop /path/to/test-rust-project
 ```
+
+For Orca changes, run `sbxr orca -y` twice against an Orca-enabled disposable
+sandbox. The first run must install or repair `xauth`, emit a private pairing
+URL, leave the unprivileged server process running, and listen only on guest
+loopback port 6768. The second run must reuse the verified AppImage and skip
+package installation. Never paste a captured pairing URL into logs or test
+artifacts.
 
 Use `rm` only when intentionally discarding the sandbox-local state. It does
 not delete the mounted host project, but sandbox packages, agent history, and

@@ -23,8 +23,10 @@ not certify dependencies, extensions, or agent output as safe.
   Node package manifests and lockfiles; links and non-regular kit files are
   rejected.
 - Toolchains and agents are pinned; available bootstrap artifacts are checksum
-  verified. Claude, Pi, and Paseo use committed npm lockfiles and install with
-  lifecycle scripts disabled.
+  verified. Codex, Claude, and Shell use official Kits v3 pinned by OCI digest.
+  Node.js uses architecture-specific 22.23.4 archives with committed SHA-256
+  digests. Pi and Paseo use committed npm lockfiles and install with lifecycle
+  scripts disabled.
 - The launcher's only direct crate dependency is exact-pinned. Its complete
   locked dependency closure is vendored, and path installation can compile it
   with `cargo install --frozen --path .` and no registry access. Executed build
@@ -47,8 +49,8 @@ not certify dependencies, extensions, or agent output as safe.
   exclude arguments, paths, environment, raw errors, output, and secret links.
 - The optional browser MCP is lockfile-pinned, installs with npm lifecycle
   scripts disabled, uses an ephemeral profile and sandbox proxy CA, and shares
-  no host browser state. Orca is checksum-pinned and binds through host
-  loopback only.
+  no host browser state. Orca is checksum-pinned, runs headlessly with
+  guest-installed Xvfb/`xauth`, and binds through host loopback only.
 
 ## Limits
 

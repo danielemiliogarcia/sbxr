@@ -1,13 +1,23 @@
+use crate::cli::Preset;
 use crate::environment::Context;
 use crate::{process, sbx};
 use std::process::Stdio;
 
 const MCP_NAME: &str = "sbxr-browser";
 
-pub(crate) fn configure(context: &Context, sandbox_name: &str) -> Result<(), String> {
+pub(crate) fn configure(
+    context: &Context,
+    sandbox_name: &str,
+    preset: Preset,
+) -> Result<(), String> {
+    let agent = if preset.has_codex() {
+        "codex"
+    } else {
+        "claude"
+    };
     let present = sbx::exec_command(context.preserve_xdg_state)
         .arg(sandbox_name)
-        .args(["--", "codex", "mcp", "get", MCP_NAME])
+        .args(["--", agent, "mcp", "get", MCP_NAME])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -22,7 +32,7 @@ pub(crate) fn configure(context: &Context, sandbox_name: &str) -> Result<(), Str
             .arg(sandbox_name)
             .args([
                 "--",
-                "codex",
+                agent,
                 "mcp",
                 "add",
                 MCP_NAME,

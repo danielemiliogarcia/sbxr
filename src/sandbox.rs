@@ -84,7 +84,9 @@ pub(crate) fn ensure_dev(
     maybe_initialize_empty_project(context, name, project)?;
     ensure_project_toolchain(context, name, project)?;
     node_tools::ensure(context, name, preset, profile)?;
-    github_proxy::ensure(context, name)?;
+    if profile.github_proxy {
+        github_proxy::ensure(context, name)?;
+    }
     if profile.orca {
         orca::ensure_installed(context, name)?;
     }
@@ -116,7 +118,7 @@ pub(crate) fn ensure_dev(
         sync::write_bootstrap_state(name, context.preserve_xdg_state, state)?;
     }
     if profile.browser {
-        browser::configure(context, name)?;
+        browser::configure(context, name, preset)?;
     }
     apply_network_profile(context, name, profile.network)?;
     Ok(state)
@@ -288,8 +290,12 @@ until sudo apt-get update; do
   sleep 2
 done
 sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends locales
-sudo sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
-sudo locale-gen en_US.UTF-8
+if [ -f /etc/locale.gen ]; then
+  sudo sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
+  sudo locale-gen en_US.UTF-8
+else
+  sudo localedef -i en_US -f UTF-8 en_US.UTF-8
+fi
 locale -a | tr '[:upper:]' '[:lower:]' | grep -qx 'en_us.utf8'
 "#;
     process::run_checked(

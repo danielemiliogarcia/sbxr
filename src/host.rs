@@ -70,6 +70,15 @@ pub(crate) fn setup(preset: Preset, preserve_xdg_state: bool) -> Result<(), Stri
                 Err(error) => failures.push(error),
             }
         }
+        if preset.has_claude() {
+            match anthropic_oauth_configured(preserve_xdg_state) {
+                Ok(true) => println!("ok   Docker host-managed Anthropic OAuth"),
+                Ok(false) => println!(
+                    "WARN Anthropic OAuth is not yet in Docker's host store; after creating a sandbox, run `sbxr claude .` and `/login` once so Docker can capture it behind the proxy"
+                ),
+                Err(error) => failures.push(error),
+            }
+        }
         if let Err(error) = sbx::require_minimum_version(preserve_xdg_state) {
             failures.push(error);
         } else if let Err(error) = sbx::setup_ssh(preserve_xdg_state) {
@@ -176,9 +185,17 @@ pub(crate) fn setup(preset: Preset, preserve_xdg_state: bool) -> Result<(), Stri
 }
 
 fn openai_oauth_configured(preserve_xdg_state: bool) -> Result<bool, String> {
+    oauth_configured(preserve_xdg_state, "openai")
+}
+
+fn anthropic_oauth_configured(preserve_xdg_state: bool) -> Result<bool, String> {
+    oauth_configured(preserve_xdg_state, "anthropic")
+}
+
+fn oauth_configured(preserve_xdg_state: bool, service: &str) -> Result<bool, String> {
     let output = process::output_checked(
-        sbx::command(preserve_xdg_state).args(["secret", "ls", "--service", "openai"]),
-        "checking OpenAI OAuth",
+        sbx::command(preserve_xdg_state).args(["secret", "ls", "--service", service]),
+        &format!("checking {service} OAuth"),
     )?;
     Ok(String::from_utf8_lossy(&output.stdout).contains("oauth configured"))
 }
@@ -334,7 +351,7 @@ pub(crate) fn doctor(context: &Context, preset: Preset, rocksdb: Option<&RocksDb
     if process::command_exists("sbx") {
         let sbx_version = match sbx::require_minimum_version(context.preserve_xdg_state) {
             Ok(version) => {
-                println!("ok   Docker Sandboxes {version} (minimum 0.39.0)");
+                println!("ok   Docker Sandboxes {version} (minimum 0.51.0 for Kits v3)");
                 Some(version)
             }
             Err(error) => {
@@ -371,6 +388,25 @@ pub(crate) fn doctor(context: &Context, preset: Preset, rocksdb: Option<&RocksDb
                 }
                 _ => {
                     println!("FAIL OpenAI OAuth is missing; run `sbxr setup`");
+                    healthy = false;
+                }
+            }
+        }
+        if preset.has_claude() {
+            match sbx::command(context.preserve_xdg_state)
+                .args(["secret", "ls", "--service", "anthropic"])
+                .output()
+            {
+                Ok(output)
+                    if output.status.success()
+                        && String::from_utf8_lossy(&output.stdout).contains("oauth configured") =>
+                {
+                    println!("ok   Docker host-managed Anthropic OAuth")
+                }
+                _ => {
+                    println!(
+                        "FAIL Anthropic OAuth is missing; create a sandbox, run `sbxr claude .`, and complete `/login` once"
+                    );
                     healthy = false;
                 }
             }

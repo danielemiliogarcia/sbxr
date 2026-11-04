@@ -1,16 +1,15 @@
-schemaVersion: "2"
+# syntax=docker/sandbox-kit:3
+schemaVersion: "3"
 kind: mixin
-name: ghcr
 version: "1.0.0"
 displayName: GitHub Container Registry proxy
 description: Allows Docker to proxy host-managed GHCR registry credentials without copying them into the guest.
-sourceURL: https://github.com/danielemiliogarcia/sbxr
+sourceUrl: https://github.com/danielemiliogarcia/sbxr
 
-security:
-  privileged: false
-
-permissions:
-  network:
-    allow:
-      - ghcr.io:443
-      - pkg-containers.githubusercontent.com:443
+capabilities:
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      runtime:
+        allow:
+          - ghcr.io:443
+          - pkg-containers.githubusercontent.com:443

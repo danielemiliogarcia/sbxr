@@ -1,25 +1,23 @@
-schemaVersion: "2"
+# syntax=docker/sandbox-kit:3
+schemaVersion: "3"
 kind: mixin
-name: browser
 version: "0.0.83"
 displayName: Playwright browser MCP
 description: Adds a lockfile-pinned, isolated Chromium MCP server for supported coding agents.
-sourceURL: https://github.com/microsoft/playwright-mcp
+sourceUrl: https://github.com/microsoft/playwright-mcp
 
-security:
-  privileged: false
-
-permissions:
-  network:
-    allow:
-      - registry.npmjs.org:443
-      - cdn.playwright.dev:443
-      - playwright.download.prss.microsoft.com:443
-      - archive.ubuntu.com:80
-      - security.ubuntu.com:80
-      - ports.ubuntu.com:80
-      - download.docker.com:443
-
-volumes:
-  - path: /home/agent/.cache/ms-playwright
-    size: 4g
+capabilities:
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      runtime:
+        allow:
+          - registry.npmjs.org:443
+          - cdn.playwright.dev:443
+          - playwright.download.prss.microsoft.com:443
+          - deb.debian.org
+          - dhi.io
+          - download.docker.com:443
+  - type: com.docker.sandbox/volume@1
+    config:
+      path: /home/agent/.cache/ms-playwright
+      size: 4g

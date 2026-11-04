@@ -1,228 +1,227 @@
-schemaVersion: "2"
+# syntax=docker/sandbox-kit:3
+schemaVersion: "3"
 kind: mixin
-name: rust
 version: "1.98.0"
 displayName: Rust development toolchain
 description: A pinned stable Rust toolchain with rustfmt, Clippy, rust-src, rust-analyzer, LLDB, cargo-vet, cargo-deny, and cargo-audit.
-sourceURL: https://github.com/docker/sbx-kits-contrib
+sourceUrl: https://github.com/docker/sbx-kits-contrib
 
-security:
-  privileged: false
+capabilities:
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      install:
+        allow: &rust-network
+          - deb.debian.org
+          - dhi.io
+          - download.docker.com:443
+          - static.rust-lang.org:443
+          - index.crates.io:443
+          - static.crates.io:443
+          - crates.io:443
+          - github.com:443
+          - release-assets.githubusercontent.com:443
+      runtime:
+        allow: *rust-network
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        - command: |
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              build-essential \
+              ca-certificates \
+              clang \
+              cmake \
+              curl \
+              git \
+              bash-completion \
+              hostname \
+              libclang-dev \
+              libssl-dev \
+              lldb \
+              locales \
+              nano \
+              pkg-config \
+              xz-utils
+            if ! locale -a | tr '[:upper:]' '[:lower:]' | grep -qx 'en_us.utf8'; then
+              if [ -f /etc/locale.gen ]; then
+                sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
+                locale-gen en_US.UTF-8
+              else
+                # Docker Hardened Images omit /etc/locale.gen even when the
+                # locale sources are installed. Generate the one locale sbxr
+                # needs directly instead of assuming the Debian helper file.
+                localedef -i en_US -f UTF-8 en_US.UTF-8
+              fi
+            fi
+            locale -a | tr '[:upper:]' '[:lower:]' | grep -qx 'en_us.utf8'
+            rm -rf /var/lib/apt/lists/*
+          user: "0"
+          description: Install native Rust build, LLDB, and UTF-8 locale prerequisites
 
-permissions:
-  network:
-    allow:
-      # Ubuntu package metadata and native build/debug dependencies. The shell
-      # template carries both Ubuntu and Docker apt sources, so apt-get update
-      # must be able to refresh all of them. ports.ubuntu.com covers arm64.
-      - archive.ubuntu.com:80
-      - security.ubuntu.com:80
-      - ports.ubuntu.com:80
-      - download.docker.com:443
-      # Pinned rustup-init and the pinned Rust toolchain/components.
-      - static.rust-lang.org:443
-      # Cargo sparse index, crate downloads, and the public registry API used
-      # by cargo-vet/cargo-audit during normal operation.
-      - index.crates.io:443
-      - static.crates.io:443
-      - crates.io:443
-      # cargo-audit and cargo-deny refresh the RustSec advisory database from
-      # https://github.com/RustSec/advisory-db. sbx policies are host-granular,
-      # so this necessarily permits other HTTPS paths on github.com too.
-      - github.com:443
-      # Redirect target for the checksum-pinned cargo-audit quickinstall
-      # release artifact hosted by GitHub.
-      - release-assets.githubusercontent.com:443
+        - command: |
+            set -euo pipefail
+            mkdir -p /home/agent/.cargo/registry /home/agent/.cargo/git /home/agent/.rustup
+            chown -R agent:agent /home/agent/.cargo /home/agent/.rustup
+          user: "0"
+          description: Make persistent Rust toolchain and Cargo cache volumes agent-owned
 
-environment:
-  variables:
-    CARGO_HOME: /home/agent/.cargo
-    RUSTUP_HOME: /home/agent/.rustup
+        - command: |
+            set -euo pipefail
+            export CARGO_HOME=/home/agent/.cargo
+            export RUSTUP_HOME=/home/agent/.rustup
+            export PATH="$CARGO_HOME/bin:$PATH"
 
-setup:
-  install:
-    - command: |
-        set -euo pipefail
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update
-        apt-get install -y --no-install-recommends \
-          build-essential \
-          ca-certificates \
-          clang \
-          cmake \
-          curl \
-          git \
-          bash-completion \
-          libclang-dev \
-          libssl-dev \
-          lldb \
-          locales \
-          nano \
-          pkg-config \
-          xz-utils
-        sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
-        locale-gen en_US.UTF-8
-        rm -rf /var/lib/apt/lists/*
-      user: "0"
-      description: Install native Rust build, LLDB, and UTF-8 locale prerequisites
+            RUSTUP_VERSION=1.29.0
+            case "$(uname -m)" in
+              x86_64|amd64)
+                TARGET=x86_64-unknown-linux-gnu
+                SHA256=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
+                ;;
+              aarch64|arm64)
+                TARGET=aarch64-unknown-linux-gnu
+                SHA256=9732d6c5e2a098d3521fca8145d826ae0aaa067ef2385ead08e6feac88fa5792
+                ;;
+              *)
+                echo "unsupported sandbox architecture: $(uname -m)" >&2
+                exit 1
+                ;;
+            esac
 
-    - command: |
-        set -euo pipefail
-        mkdir -p /home/agent/.cargo/registry /home/agent/.cargo/git /home/agent/.rustup
-        chown -R agent:agent /home/agent/.cargo /home/agent/.rustup
-      user: "0"
-      description: Make persistent Rust toolchain and Cargo cache volumes agent-owned
+            if [ ! -x "$CARGO_HOME/bin/rustup" ]; then
+              URL="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${TARGET}/rustup-init"
+              curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/rustup-init "$URL"
+              echo "$SHA256  /tmp/rustup-init" | sha256sum -c -
+              chmod 0755 /tmp/rustup-init
+              /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain none
+              rm -f /tmp/rustup-init
+            fi
 
-    - command: |
-        set -euo pipefail
-        export CARGO_HOME=/home/agent/.cargo
-        export RUSTUP_HOME=/home/agent/.rustup
-        export PATH="$CARGO_HOME/bin:$PATH"
+            rustup toolchain install 1.98.0 --profile minimal
+            rustup component add --toolchain 1.98.0 rustfmt clippy rust-src rust-analyzer
+            rustup default 1.98.0
+            rustc --version
+            cargo --version
+          user: "1000"
+          description: Install rustup 1.29.0 and pinned Rust 1.98.0 components
 
-        RUSTUP_VERSION=1.29.0
-        case "$(uname -m)" in
-          x86_64|amd64)
-            TARGET=x86_64-unknown-linux-gnu
-            SHA256=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
-            ;;
-          aarch64|arm64)
-            TARGET=aarch64-unknown-linux-gnu
-            SHA256=9732d6c5e2a098d3521fca8145d826ae0aaa067ef2385ead08e6feac88fa5792
-            ;;
-          *)
-            echo "unsupported sandbox architecture: $(uname -m)" >&2
-            exit 1
-            ;;
-        esac
+        # Keep source builds in separate hooks: sbx bounds each install hook's
+        # execution time. The job setting applies only while provisioning, not to
+        # developers' builds.
+        - command: |
+            set -euo pipefail
+            export CARGO_HOME=/home/agent/.cargo
+            export RUSTUP_HOME=/home/agent/.rustup
+            export PATH="$CARGO_HOME/bin:$PATH"
+            export CARGO_BUILD_JOBS=16
+            cargo-vet --version 2>/dev/null | grep -Fq 0.10.2 || \
+              cargo install --locked cargo-vet --version 0.10.2
+          user: "1000"
+          description: Install pinned cargo-vet 0.10.2
 
-        if [ ! -x "$CARGO_HOME/bin/rustup" ]; then
-          URL="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${TARGET}/rustup-init"
-          curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/rustup-init "$URL"
-          echo "$SHA256  /tmp/rustup-init" | sha256sum -c -
-          chmod 0755 /tmp/rustup-init
-          /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain none
-          rm -f /tmp/rustup-init
-        fi
+        - command: |
+            set -euo pipefail
+            export CARGO_HOME=/home/agent/.cargo
+            export RUSTUP_HOME=/home/agent/.rustup
+            export PATH="$CARGO_HOME/bin:$PATH"
+            export CARGO_BUILD_JOBS=16
+            cargo-deny --version 2>/dev/null | grep -Fq 0.20.2 || \
+              cargo install --locked cargo-deny --version 0.20.2
+          user: "1000"
+          description: Install pinned cargo-deny 0.20.2
 
-        rustup toolchain install 1.98.0 --profile minimal
-        rustup component add --toolchain 1.98.0 rustfmt clippy rust-src rust-analyzer
-        rustup default 1.98.0
-        rustc --version
-        cargo --version
-      user: "1000"
-      description: Install rustup 1.29.0 and pinned Rust 1.98.0 components
+        - command: |
+            set -euo pipefail
+            export CARGO_HOME=/home/agent/.cargo
+            export PATH="$CARGO_HOME/bin:$PATH"
+            if ! cargo-audit --version 2>/dev/null | grep -Fq 0.22.2; then
+              case "$(uname -m)" in
+                x86_64)
+                  TARGET=x86_64-unknown-linux-gnu
+                  SHA256=a2dc84bc76c3faa1a8115719d62adebe0bd4d65effa83340f0c3f7e2f7012709
+                  ;;
+                aarch64|arm64)
+                  TARGET=aarch64-unknown-linux-gnu
+                  SHA256=4d6b2397d5c0260ee813c312d340c5631e0bf95e0637596cca8588a92bf4439f
+                  ;;
+                *)
+                  echo "unsupported architecture: $(uname -m)" >&2
+                  exit 1
+                  ;;
+              esac
+              ARCHIVE=/tmp/cargo-audit.tar.gz
+              URL="https://github.com/cargo-bins/cargo-quickinstall/releases/download/cargo-audit-0.22.2/cargo-audit-0.22.2-${TARGET}.tar.gz"
+              curl --proto '=https' --tlsv1.2 -fsSL -o "$ARCHIVE" "$URL"
+              echo "$SHA256  $ARCHIVE" | sha256sum -c -
+              tar -xzf "$ARCHIVE" -C "$CARGO_HOME/bin" cargo-audit
+              chmod 0755 "$CARGO_HOME/bin/cargo-audit"
+              rm -f "$ARCHIVE"
+            fi
+            cargo-audit --version | grep -F 0.22.2
+          user: "1000"
+          description: Install checksum-pinned cargo-audit 0.22.2 quickinstall binary
 
-    # Keep source builds in separate hooks: sbx bounds each install hook's
-    # execution time. The job setting applies only while provisioning, not to
-    # developers' builds.
-    - command: |
-        set -euo pipefail
-        export CARGO_HOME=/home/agent/.cargo
-        export RUSTUP_HOME=/home/agent/.rustup
-        export PATH="$CARGO_HOME/bin:$PATH"
-        export CARGO_BUILD_JOBS=16
-        cargo-vet --version 2>/dev/null | grep -Fq 0.10.2 || \
-          cargo install --locked cargo-vet --version 0.10.2
-      user: "1000"
-      description: Install pinned cargo-vet 0.10.2
+        - command: |
+            set -euo pipefail
+            for tool in \
+              cargo cargo-audit cargo-clippy cargo-deny cargo-vet clippy-driver \
+              rust-analyzer rustc rustdoc rustfmt rustup; do
+              test -e "/home/agent/.cargo/bin/$tool"
+              ln -sfn "/home/agent/.cargo/bin/$tool" "/usr/local/bin/$tool"
+            done
+          user: "0"
+          description: Expose Rust commands to login and non-interactive shells
 
-    - command: |
-        set -euo pipefail
-        export CARGO_HOME=/home/agent/.cargo
-        export RUSTUP_HOME=/home/agent/.rustup
-        export PATH="$CARGO_HOME/bin:$PATH"
-        export CARGO_BUILD_JOBS=16
-        cargo-deny --version 2>/dev/null | grep -Fq 0.20.2 || \
-          cargo install --locked cargo-deny --version 0.20.2
-      user: "1000"
-      description: Install pinned cargo-deny 0.20.2
+        - command: |
+            set -euo pipefail
+            mkdir -p /home/agent/.config/sbxr
+            cat > /home/agent/.config/sbxr/bash-prompt.bash <<'SBXR_PROMPT'
+            # Managed by sbxr. This file is safe to source more than once.
+            __sbxr_git_branch() {
+              local branch
+              branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || \
+                branch=$(git rev-parse --short HEAD 2>/dev/null) || return 0
+              printf ' (%s)' "$branch"
+            }
 
-    - command: |
-        set -euo pipefail
-        export CARGO_HOME=/home/agent/.cargo
-        export PATH="$CARGO_HOME/bin:$PATH"
-        if ! cargo-audit --version 2>/dev/null | grep -Fq 0.22.2; then
-          case "$(uname -m)" in
-            x86_64)
-              TARGET=x86_64-unknown-linux-gnu
-              SHA256=a2dc84bc76c3faa1a8115719d62adebe0bd4d65effa83340f0c3f7e2f7012709
-              ;;
-            aarch64|arm64)
-              TARGET=aarch64-unknown-linux-gnu
-              SHA256=4d6b2397d5c0260ee813c312d340c5631e0bf95e0637596cca8588a92bf4439f
-              ;;
-            *)
-              echo "unsupported architecture: $(uname -m)" >&2
-              exit 1
-              ;;
-          esac
-          ARCHIVE=/tmp/cargo-audit.tar.gz
-          URL="https://github.com/cargo-bins/cargo-quickinstall/releases/download/cargo-audit-0.22.2/cargo-audit-0.22.2-${TARGET}.tar.gz"
-          curl --proto '=https' --tlsv1.2 -fsSL -o "$ARCHIVE" "$URL"
-          echo "$SHA256  $ARCHIVE" | sha256sum -c -
-          tar -xzf "$ARCHIVE" -C "$CARGO_HOME/bin" cargo-audit
-          chmod 0755 "$CARGO_HOME/bin/cargo-audit"
-          rm -f "$ARCHIVE"
-        fi
-        cargo-audit --version | grep -F 0.22.2
-      user: "1000"
-      description: Install checksum-pinned cargo-audit 0.22.2 quickinstall binary
-
-    - command: |
-        set -euo pipefail
-        for tool in \
-          cargo cargo-audit cargo-clippy cargo-deny cargo-vet clippy-driver \
-          rust-analyzer rustc rustdoc rustfmt rustup; do
-          test -e "/home/agent/.cargo/bin/$tool"
-          ln -sfn "/home/agent/.cargo/bin/$tool" "/usr/local/bin/$tool"
-        done
-      user: "0"
-      description: Expose Rust commands to login and non-interactive shells
-
-    - command: |
-        set -euo pipefail
-        mkdir -p /home/agent/.config/sbxr
-        cat > /home/agent/.config/sbxr/bash-prompt.bash <<'SBXR_PROMPT'
-        # Managed by sbxr. This file is safe to source more than once.
-        __sbxr_git_branch() {
-          local branch
-          branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || \
-            branch=$(git rev-parse --short HEAD 2>/dev/null) || return 0
-          printf ' (%s)' "$branch"
-        }
-
-        case "${TERM:-dumb}" in
-          dumb)
-            PS1='\u@\h:\w$(__sbxr_git_branch)\$ '
-            ;;
-          *)
-            PS1='\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[01;33m\]$(__sbxr_git_branch)\[\033[00m\]\$ '
-            ;;
-        esac
-        SBXR_PROMPT
-        touch /home/agent/.bashrc
-        if ! grep -Fq '.config/sbxr/bash-prompt.bash' /home/agent/.bashrc; then
-          printf '%s\n' \
-            '' \
-            '# sbxr interactive prompt' \
-            '[ -f "$HOME/.config/sbxr/bash-prompt.bash" ] && . "$HOME/.config/sbxr/bash-prompt.bash"' \
-            >> /home/agent/.bashrc
-        fi
-        if ! grep -Fq '/usr/share/bash-completion/bash_completion' /home/agent/.bashrc; then
-          printf '%s\n' \
-            '' \
-            '# sbxr Bash and Git completion' \
-            '[ -r /usr/share/bash-completion/bash_completion ] && . /usr/share/bash-completion/bash_completion' \
-            >> /home/agent/.bashrc
-        fi
-        chown -R agent:agent /home/agent/.config/sbxr /home/agent/.bashrc
-      user: "0"
-      description: Install a colored prompt and Bash/Git completion
-
-volumes:
-  - path: /home/agent/.cargo/registry
-    size: 4g
-  - path: /home/agent/.cargo/git
-    size: 2g
-  - path: /home/agent/.rustup
-    size: 8g
+            case "${TERM:-dumb}" in
+              dumb)
+                PS1='\u@\h:\w$(__sbxr_git_branch)\$ '
+                ;;
+              *)
+                PS1='\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[01;33m\]$(__sbxr_git_branch)\[\033[00m\]\$ '
+                ;;
+            esac
+            SBXR_PROMPT
+            touch /home/agent/.bashrc
+            if ! grep -Fq '.config/sbxr/bash-prompt.bash' /home/agent/.bashrc; then
+              printf '%s\n' \
+                '' \
+                '# sbxr interactive prompt' \
+                '[ -f "$HOME/.config/sbxr/bash-prompt.bash" ] && . "$HOME/.config/sbxr/bash-prompt.bash"' \
+                >> /home/agent/.bashrc
+            fi
+            if ! grep -Fq '/usr/share/bash-completion/bash_completion' /home/agent/.bashrc; then
+              printf '%s\n' \
+                '' \
+                '# sbxr Bash and Git completion' \
+                '[ -r /usr/share/bash-completion/bash_completion ] && . /usr/share/bash-completion/bash_completion' \
+                >> /home/agent/.bashrc
+            fi
+            chown -R agent:agent /home/agent/.config/sbxr /home/agent/.bashrc
+          user: "0"
+          description: Install a colored prompt and Bash/Git completion
+  - type: com.docker.sandbox/volume@1
+    config:
+      path: /home/agent/.cargo/registry
+      size: 4g
+  - type: com.docker.sandbox/volume@1
+    config:
+      path: /home/agent/.cargo/git
+      size: 2g
+  - type: com.docker.sandbox/volume@1
+    config:
+      path: /home/agent/.rustup
+      size: 8g

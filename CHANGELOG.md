@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+## [0.3.1] - 2026-11-04
+
+### Changed
+
+- Migrated every active local integration to Docker Sandboxes Kits v3 and
+  pinned the official Codex, Claude, Claude mixin, and Shell workloads by OCI
+  digest.
+- Multi-agent sandboxes now compose the official Codex workload with Docker's
+  official Claude mixin, so OpenAI and Anthropic OAuth remain behind their
+  host proxies. Removed sbxr's duplicated npm-installed Claude distribution.
+- Added an actual Anthropic proxy request to `auth-status` and `verify`; a
+  sentinel-shaped Pi auth file alone is no longer reported as proof that the
+  proxy route works.
+- Declared SSH-agent forwarding explicitly through the v3 capability while
+  retaining sbxr's current unrestricted compatibility behavior.
+- Added a Kits v3 checksum-pinned Node.js 22.23.4 runtime because the official
+  hardened workloads no longer guarantee a guest Node installation.
+- Stopped capability sync from writing through Docker 0.51's read-only Claude
+  skills mount; environment-provided skills remain available there directly.
+- Isolated root-run npm bootstrap caching from the agent's writable npm cache,
+  preventing ownership failures during Pi extension synchronization.
+- Bumped `sbxr` to 0.3.1 and raised the minimum Docker Sandboxes version to
+  0.51.0, the first supported release for this Kits v3 composition.
+
+### Fixed
+
+- Install the `xauth` prerequisite required by Orca's `xvfb-run` launcher and
+  repair existing Orca-enabled sandboxes without downloading the pinned
+  AppImage again.
+- Adapted provisioning to hardened workload images that omit `/etc/locale.gen`,
+  `hostname`, and the Node.js runtime, and made GitHub SSH host-key setup
+  independent of v2 kit file-copy ordering.
+
 ## [0.3.0] - 2026-11-03
 
 ### Added

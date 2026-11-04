@@ -36,6 +36,12 @@ fn main() {
 mod tests {
     #[test]
     fn release_version_file_matches_cargo_package() {
-        assert_eq!(include_str!("../VERSION").trim(), env!("CARGO_PKG_VERSION"));
+        let version = env!("CARGO_PKG_VERSION");
+        assert_eq!(include_str!("../VERSION").trim(), version);
+        assert!(
+            include_str!("../Cargo.lock")
+                .contains(&format!("name = \"sbxr\"\nversion = \"{version}\""))
+        );
+        assert!(include_str!("../CHANGELOG.md").contains(&format!("## [{version}]")));
     }
 }

@@ -24,38 +24,10 @@ struct Tool {
 
 type ToolAssets<'a> = (&'a Tool, Vec<u8>, Vec<u8>);
 
-const CLAUDE_INSTALL: &str = r#"
-set -euo pipefail
-TOOL_ROOT=/opt/sbxr-tools/claude
-npm ci --prefix "$TOOL_ROOT" --ignore-scripts --no-audit --no-fund
-node - "$TOOL_ROOT" <<'NODE'
-const fs = require('node:fs');
-const path = require('node:path');
-const toolRoot = process.argv[2];
-const claudeRoot = path.join(toolRoot, 'node_modules/@anthropic-ai/claude-code');
-const nativePackage = '@anthropic-ai/claude-code-linux-' + process.arch;
-const source = path.join(path.dirname(require.resolve(nativePackage + '/package.json', {paths: [claudeRoot]})), 'claude');
-fs.accessSync(source, fs.constants.X_OK);
-const destination = path.join(claudeRoot, 'bin/claude.exe');
-fs.rmSync(destination, {force: true});
-fs.symlinkSync(source, destination);
-NODE
-REAL="$TOOL_ROOT/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
-SHIM=/usr/local/bin/claude
-test -x "$REAL"
-rm -f "$SHIM"
-printf '%s\n' \
-  '#!/bin/sh' \
-  '# Prefer the Docker-managed OAuth credential file over API-key variables.' \
-  'unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL' \
-  "exec \"$REAL\" \"\$@\"" > "$SHIM"
-chmod 0755 "$SHIM"
-claude --version
-"#;
-
 const PI_INSTALL: &str = r#"
 set -euo pipefail
 TOOL_ROOT=/opt/sbxr-tools/pi
+export npm_config_cache=/opt/sbxr-tools/.npm-cache
 node -e '
   const [major, minor] = process.versions.node.split(".").map(Number);
   if (major < 22 || (major === 22 && minor < 19)) {
@@ -130,9 +102,39 @@ chown -R agent:agent /home/agent/.pi
 pi --version
 "#;
 
+const PI_PROXY_AUTH: &str = r#"
+set -euo pipefail
+mkdir -p /home/agent/.pi/agent
+node <<'NODE'
+const fs = require("fs");
+const path = "/home/agent/.pi/agent/auth.json";
+let auth = {};
+try { auth = JSON.parse(fs.readFileSync(path, "utf8")); } catch {}
+auth["openai-codex"] = {
+  type: "oauth",
+  access: "oai-oat01-proxy-managed",
+  refresh: "proxy-managed",
+  expires: 4102444800000,
+  accountId: "proxy-managed",
+  source: "docker-sbx-proxy"
+};
+auth.anthropic = {
+  type: "oauth",
+  access: "sk-ant-oat01-proxy-managed",
+  refresh: "sk-ant-ort01-proxy-managed",
+  expires: 4102444800000,
+  source: "docker-sbx-proxy"
+};
+fs.writeFileSync(path, JSON.stringify(auth, null, 2) + "\n", { mode: 0o600 });
+fs.chmodSync(path, 0o600);
+NODE
+chown -R agent:agent /home/agent/.pi
+"#;
+
 const PASEO_INSTALL: &str = r#"
 set -euo pipefail
 TOOL_ROOT=/opt/sbxr-tools/paseo
+export npm_config_cache=/opt/sbxr-tools/.npm-cache
 npm ci --prefix "$TOOL_ROOT" --ignore-scripts --no-audit --no-fund
 ln -sfn "$TOOL_ROOT/node_modules/.bin/paseo" /usr/local/bin/paseo
 paseo --version
@@ -141,6 +143,7 @@ paseo --version
 const BROWSER_INSTALL: &str = r#"
 set -euo pipefail
 TOOL_ROOT=/opt/sbxr-tools/browser
+export npm_config_cache=/opt/sbxr-tools/.npm-cache
 export PLAYWRIGHT_BROWSERS_PATH=/home/agent/.cache/ms-playwright
 npm ci --prefix "$TOOL_ROOT" --ignore-scripts --no-audit --no-fund
 node "$TOOL_ROOT/node_modules/playwright/cli.js" install-deps chromium
@@ -173,12 +176,6 @@ chmod 0755 /usr/local/bin/sbxr-browser-mcp
 test -x /usr/local/bin/sbxr-browser-mcp
 "#;
 
-const CLAUDE: Tool = Tool {
-    name: "Claude Code",
-    kit: "claude-cli",
-    install: CLAUDE_INSTALL,
-    executable: "/usr/local/bin/claude",
-};
 const PI: Tool = Tool {
     name: "Pi",
     kit: "pi-cli",
@@ -205,7 +202,7 @@ pub(crate) fn ensure(
     profile: &Profile,
 ) -> Result<(), String> {
     let mut tools = if preset == Preset::MultiAgent {
-        vec![CLAUDE, PI, PASEO]
+        vec![PI, PASEO]
     } else {
         vec![PASEO]
     };
@@ -215,7 +212,7 @@ pub(crate) fn ensure(
     let assets = load_assets(context, &tools)?;
     let wanted = toolchain_hash(&tools, &assets);
     if installed(context, sandbox_name, &tools, &wanted)? {
-        return Ok(());
+        return reassert_pi_proxy_auth(context, sandbox_name, preset);
     }
 
     println!("==> installing lockfile-pinned Node tools");
@@ -251,6 +248,28 @@ pub(crate) fn ensure(
         sandbox_name,
         MARKER,
         OsStr::new(&wanted),
+    )?;
+    reassert_pi_proxy_auth(context, sandbox_name, preset)
+}
+
+fn reassert_pi_proxy_auth(
+    context: &Context,
+    sandbox_name: &str,
+    preset: Preset,
+) -> Result<(), String> {
+    if preset != Preset::MultiAgent {
+        return Ok(());
+    }
+    process::run_checked(
+        sbx::exec_command(context.preserve_xdg_state).args([
+            "-u",
+            "root",
+            sandbox_name,
+            "bash",
+            "-lc",
+            PI_PROXY_AUTH,
+        ]),
+        "reasserting Pi proxy-managed authentication",
     )
 }
 
@@ -381,14 +400,21 @@ mod tests {
 
     #[test]
     fn pi_install_always_reasserts_proxy_managed_authentication() {
-        assert!(PI_INSTALL.contains("auth[\"openai-codex\"] ="));
-        assert!(PI_INSTALL.contains("auth.anthropic ="));
-        assert!(!PI_INSTALL.contains("if (!auth"));
+        assert!(PI_PROXY_AUTH.contains("auth[\"openai-codex\"] ="));
+        assert!(PI_PROXY_AUTH.contains("auth.anthropic ="));
+        assert!(!PI_PROXY_AUTH.contains("if (!auth"));
+    }
+
+    #[test]
+    fn root_installs_do_not_use_the_agent_npm_cache() {
+        for install in [PI_INSTALL, PASEO_INSTALL, BROWSER_INSTALL] {
+            assert!(install.contains("npm_config_cache=/opt/sbxr-tools/.npm-cache"));
+        }
     }
 
     #[test]
     fn vendored_tool_roots_match_guest_roots() {
-        for tool in [CLAUDE, PI, PASEO] {
+        for tool in [PI, PASEO] {
             let root =
                 PathBuf::from("files/opt/sbxr-tools").join(tool.kit.trim_end_matches("-cli"));
             assert_eq!(

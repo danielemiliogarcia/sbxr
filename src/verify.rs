@@ -1,7 +1,7 @@
 use crate::cli::Preset;
 use crate::environment::{Context, Project};
 use crate::profile::Profile;
-use crate::{envfile, process, sandbox, sbx};
+use crate::{auth, envfile, process, sandbox, sbx};
 use serde_json::Value;
 
 const CREDENTIAL_AUDIT: &str = r#"
@@ -149,6 +149,10 @@ pub(crate) fn run(
 
     verify_runtime(context, project, preset, profile)?;
     verify_credentials(context, name)?;
+    if preset.has_claude() {
+        auth::verify_anthropic_proxy(context, name)?;
+        println!("ok   Anthropic OAuth proxy accepted the guest sentinel");
+    }
     report_tool_versions(context, name, preset, profile)?;
     verify_forwarded_agent(context, name)?;
     println!("verified: {name}");
@@ -167,7 +171,7 @@ fn verify_runtime(
         .map_err(|error| format!("could not parse Docker sandbox inspection: {error}"))?;
     for (field, expected) in [
         ("name", name),
-        ("agent", envfile::agent_name(preset, profile)),
+        ("agent", envfile::agent_name(preset)),
         ("workspace", project.path.to_string_lossy().as_ref()),
     ] {
         if value.get(field).and_then(Value::as_str) != Some(expected) {
@@ -191,7 +195,7 @@ fn verify_runtime(
     }
     if let Some(kits) = value.get("kits").and_then(Value::as_array) {
         let actual = kits.iter().filter_map(Value::as_str).collect::<Vec<_>>();
-        for kit in envfile::selected_kits(
+        for kit in envfile::selected_kit_references(
             context,
             match profile.workspace {
                 crate::profile::WorkspaceMode::Shared => envfile::Kind::Development(preset),
@@ -199,18 +203,26 @@ fn verify_runtime(
             },
             false,
             profile,
-        ) {
-            let expected = kit.to_string_lossy();
-            if !actual.iter().any(|value| *value == expected) {
+        )? {
+            if !actual
+                .iter()
+                .any(|value| kit_reference_matches(value, &kit))
+            {
                 return Err(format!(
                     "runtime verification failed: selected kit {} is missing",
-                    kit.display()
+                    kit
                 ));
             }
         }
     }
     println!("ok   runtime identity and shared workspace match the sbxr contract");
     Ok(())
+}
+
+fn kit_reference_matches(actual: &str, expected: &str) -> bool {
+    actual == expected
+        || actual.strip_prefix("docker.io/") == Some(expected)
+        || expected.strip_prefix("docker.io/") == Some(actual)
 }
 
 fn verify_credentials(context: &Context, sandbox_name: &str) -> Result<(), String> {
@@ -284,7 +296,9 @@ fn report_tool_versions(
         println!("ok   {tool}: {version}");
         let expected = match tool {
             "rustc" | "cargo" => Some("1.98.0"),
-            "claude" => Some("2.1.239"),
+            "codex" => Some(envfile::CODEX_VERSION),
+            "claude" if preset == Preset::MultiAgent => Some(envfile::CLAUDE_MIXIN_VERSION),
+            "claude" => Some(envfile::CLAUDE_WORKLOAD_VERSION),
             "pi" => Some("1.4.0"),
             "paseo" => Some("0.8.0"),
             "gh" => Some("2.102.0"),
@@ -388,5 +402,22 @@ mod tests {
         assert!(!CREDENTIAL_AUDIT.contains("ghp_"));
         assert!(CREDENTIAL_AUDIT.contains("proxy-managed"));
         assert!(CREDENTIAL_AUDIT.contains(r#"{"access", "refresh"}"#));
+    }
+
+    #[test]
+    fn published_kit_verification_accepts_docker_hub_normalization() {
+        let digest = "sbx/codex@sha256:abc";
+        assert!(kit_reference_matches(
+            "docker.io/sbx/codex@sha256:abc",
+            digest
+        ));
+        assert!(kit_reference_matches(
+            digest,
+            "docker.io/sbx/codex@sha256:abc"
+        ));
+        assert!(!kit_reference_matches(
+            "docker.io/sbx/codex@sha256:def",
+            digest
+        ));
     }
 }

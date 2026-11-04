@@ -6,7 +6,7 @@ use std::process::{Command, Output};
 
 const MINIMUM_VERSION: Version = Version {
     major: 0,
-    minor: 39,
+    minor: 51,
     patch: 0,
 };
 
@@ -293,10 +293,10 @@ mod tests {
     #[test]
     fn parses_and_orders_versions() {
         assert_eq!(
-            Version::parse("sbx version: v0.39.0 abc").unwrap(),
+            Version::parse("sbx version: v0.51.0 abc").unwrap(),
             MINIMUM_VERSION
         );
-        assert!(Version::parse("sbx version: v0.40.1").unwrap() > MINIMUM_VERSION);
+        assert!(Version::parse("sbx version: v0.51.1").unwrap() > MINIMUM_VERSION);
         assert!(Version::parse("unknown").is_err());
     }
 

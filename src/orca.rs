@@ -9,7 +9,23 @@ const ARM64_SHA512_BASE64: &str =
     "bsI3xfKZzAeoj2JnQRGwcDLhF4u81uQpPf6BdBCXb4LC1n9ujVUXdtsqAbSSgA5y02oOkflpl8CZc+TzlmonBQ==";
 
 pub(crate) fn ensure_installed(context: &Context, sandbox_name: &str) -> Result<(), String> {
-    let script = format!(
+    let script = installation_script();
+    println!("==> installing checksum-pinned Orca {VERSION} (optional integration)");
+    process::run_checked(
+        sbx::exec_command(context.preserve_xdg_state).args([
+            "-u",
+            "root",
+            sandbox_name,
+            "bash",
+            "-lc",
+            &script,
+        ]),
+        "installing the Orca remote server",
+    )
+}
+
+fn installation_script() -> String {
+    format!(
         r#"set -euo pipefail
 install -d -o agent -g agent -m 0700 \
   /home/agent/.config/orca \
@@ -19,20 +35,26 @@ chown -R agent:agent \
   /home/agent/.config/orca \
   /home/agent/.local/share/orca \
   /home/agent/.local/state/sbxr
-if [ -x /opt/sbxr-orca/{VERSION}/squashfs-root/AppRun ]; then exit 0; fi
+root=/opt/sbxr-orca/{VERSION}
+if [ -x "$root/squashfs-root/AppRun" ] \
+  && [ -x /usr/local/bin/sbxr-orca-server ] \
+  && command -v xvfb-run >/dev/null 2>&1 \
+  && command -v xauth >/dev/null 2>&1; then
+  exit 0
+fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
-  ca-certificates curl file jq xvfb zlib1g-dev \
+  ca-certificates curl file jq xauth xvfb zlib1g-dev \
   libasound2t64 libgtk-3-0t64 libnotify4 libnss3 libsecret-1-0 \
   libxss1 libxtst6 xdg-utils
 rm -rf /var/lib/apt/lists/*
+if [ ! -x "$root/squashfs-root/AppRun" ]; then
 case "$(uname -m)" in
   x86_64|amd64) asset=orca-linux.AppImage; digest='{X64_SHA512_BASE64}' ;;
   aarch64|arm64) asset=orca-linux-arm64.AppImage; digest='{ARM64_SHA512_BASE64}' ;;
   *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
 esac
-root=/opt/sbxr-orca/{VERSION}
 temporary=/tmp/orca.AppImage
 curl --proto '=https' --tlsv1.2 -fsSL -o "$temporary" \
   "https://github.com/stablyai/orca/releases/download/v{VERSION}/$asset"
@@ -46,6 +68,7 @@ cd "$root"
 "$temporary" --appimage-extract >/dev/null
 rm -f "$temporary"
 test -x "$root/squashfs-root/AppRun"
+fi
 cat > /usr/local/bin/sbxr-orca-server <<'SH'
 #!/bin/sh
 set -eu
@@ -53,18 +76,6 @@ exec xvfb-run -a /opt/sbxr-orca/{VERSION}/squashfs-root/AppRun "$@"
 SH
 chmod 0755 /usr/local/bin/sbxr-orca-server
 "#
-    );
-    println!("==> installing checksum-pinned Orca {VERSION} (optional integration)");
-    process::run_checked(
-        sbx::exec_command(context.preserve_xdg_state).args([
-            "-u",
-            "root",
-            sandbox_name,
-            "bash",
-            "-lc",
-            &script,
-        ]),
-        "installing the Orca remote server",
     )
 }
 
@@ -198,7 +209,9 @@ fn base64_url_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64_url_decode, base64_url_encode, rewrite_pairing_endpoint};
+    use super::{
+        base64_url_decode, base64_url_encode, installation_script, rewrite_pairing_endpoint,
+    };
     use serde_json::{Value, json};
 
     #[test]
@@ -227,5 +240,14 @@ mod tests {
             assert!(!encoded.contains('='));
             assert_eq!(base64_url_decode(&encoded).unwrap(), value);
         }
+    }
+
+    #[test]
+    fn installation_requires_and_repairs_xauth_without_redownloading_orca() {
+        let script = installation_script();
+
+        assert!(script.contains("command -v xauth"));
+        assert!(script.contains("curl file jq xauth xvfb"));
+        assert!(script.contains("if [ ! -x \"$root/squashfs-root/AppRun\" ]; then"));
     }
 }

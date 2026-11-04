@@ -1,49 +1,44 @@
-schemaVersion: "2"
+# syntax=docker/sandbox-kit:3
+schemaVersion: "3"
 kind: mixin
-name: pi-cli
 version: "1.4.0"
 displayName: Pi coding agent CLI
-description: Adds pinned Pi with Docker host-managed Codex and Claude subscription OAuth.
-sourceURL: https://github.com/earendil-works/pi
+description: Adds pinned Pi with Docker host-proxied Codex and Claude subscription OAuth sentinels.
+sourceUrl: https://github.com/earendil-works/pi
 
-security:
-  privileged: false
-
-permissions:
-  network:
-    allow:
-      - registry.npmjs.org:443
-      - pi.dev:443
-      - api.anthropic.com:443
-      - platform.claude.com:443
-      - claude.ai:443
-      - auth.openai.com:443
-      - chatgpt.com:443
-
-environment:
-  variables:
-    PI_SKIP_VERSION_CHECK: "1"
-    PI_TELEMETRY: "0"
-
-setup:
-  install:
-    - command: |
-        set -euo pipefail
-        mkdir -p /home/agent/.pi/agent
-        chown -R agent:agent /home/agent/.pi
-      user: "0"
-      description: Make the persistent Pi state volume agent-owned
-
-    - command: |
-        set -euo pipefail
-        mkdir -p /home/agent/.pi/agent
-        if [ ! -f /home/agent/.pi/agent/settings.json ]; then
-          printf '%s\n' '{"defaultProjectTrust":"never","enableInstallTelemetry":false}' > /home/agent/.pi/agent/settings.json
-          chmod 0600 /home/agent/.pi/agent/settings.json
-        fi
-      user: "1000"
-      description: Disable telemetry and default project-local extensions to untrusted
-
-volumes:
-  - path: /home/agent/.pi/agent
-    size: 2g
+capabilities:
+  # The official Codex workload and Claude mixin own the credential capabilities.
+  # Pi consumes their sentinels and never receives the reusable host tokens.
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      runtime:
+        allow:
+          - registry.npmjs.org:443
+          - pi.dev:443
+          - api.anthropic.com:443
+          - platform.claude.com:443
+          - claude.ai:443
+          - auth.openai.com:443
+          - chatgpt.com:443
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        - command: |
+            set -euo pipefail
+            mkdir -p /home/agent/.pi/agent
+            chown -R agent:agent /home/agent/.pi
+          user: "0"
+          description: Make the persistent Pi state volume agent-owned
+        - command: |
+            set -euo pipefail
+            mkdir -p /home/agent/.pi/agent
+            if [ ! -f /home/agent/.pi/agent/settings.json ]; then
+              printf '%s\n' '{"defaultProjectTrust":"never","enableInstallTelemetry":false}' > /home/agent/.pi/agent/settings.json
+              chmod 0600 /home/agent/.pi/agent/settings.json
+            fi
+          user: agent
+          description: Disable telemetry and default project-local extensions to untrusted
+  - type: com.docker.sandbox/volume@1
+    config:
+      path: /home/agent/.pi/agent
+      size: 2g

@@ -13,6 +13,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 const GUEST_CONTRACT_MARKER: &str = "/home/agent/.local/state/sbxr/environment-contract-v1";
+pub(crate) const CODEX_VERSION: &str = "0.166.0";
+pub(crate) const CODEX_WORKLOAD: &str =
+    "docker.io/sbx/codex@sha256:b41daf2cd2837c53d3e6932a9460761dd737d1b1b4f5978670adf496c5a1b30c";
+pub(crate) const CLAUDE_WORKLOAD_VERSION: &str = "2.1.317";
+pub(crate) const CLAUDE_WORKLOAD: &str =
+    "docker.io/sbx/claude@sha256:d2a9f6ec91ecb0d8e2a92fe060abde55ff24f5f3d1644600965060e03d0cbf5d";
+pub(crate) const CLAUDE_MIXIN_VERSION: &str = "2.1.267";
+pub(crate) const CLAUDE_MIXIN: &str = "docker.io/sbx/claude-mixin@sha256:e4d28ab7d38d64e9a205433cde85111af67e55e0f6f84748ff2d20bfa9fe2a22";
+pub(crate) const SHELL_WORKLOAD: &str =
+    "docker.io/sbx/shell@sha256:6289eaec55acb89d0d5bfc46b2a5870a61cd2252d270621adf2fe7a0e139ab83";
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -430,11 +440,11 @@ fn render(
     profile: &Profile,
 ) -> Result<String, String> {
     let (sandbox_name, agent, clone) = match kind {
-        Kind::Development(preset) => (&project.name, agent_name(preset, profile), false),
-        Kind::Isolated(preset) => (&project.isolated_name, agent_name(preset, profile), true),
+        Kind::Development(preset) => (&project.name, agent_name(preset), false),
+        Kind::Isolated(preset) => (&project.isolated_name, agent_name(preset), true),
         Kind::Review => (&project.review_name, "shell", true),
     };
-    let kits = selected_kits(context, kind, rocksdb.is_some(), profile);
+    let kits = selected_kit_references(context, kind, rocksdb.is_some(), profile)?;
     let mut output = String::new();
     output.push_str("schemaVersion: \"1\"\nname: ");
     output.push_str(&yaml_string(sandbox_name)?);
@@ -461,7 +471,7 @@ fn render(
     output.push_str("kits:\n");
     for kit in kits {
         output.push_str("  - ");
-        output.push_str(&yaml_path(&kit)?);
+        output.push_str(&yaml_string(&kit)?);
         output.push('\n');
     }
     if matches!(kind, Kind::Development(_) | Kind::Isolated(_)) {
@@ -502,18 +512,42 @@ fn render(
     if let Some(rocksdb) = rocksdb {
         output.push_str("additionalWorkspaces:\n  - path: ");
         output.push_str(&yaml_path(&rocksdb.prefix)?);
-        output.push_str("\n    readOnly: true\nenv:\n  ROCKSDB_LIB_DIR: ");
-        output.push_str(&yaml_string(&rocksdb.library_dir)?);
-        output.push_str("\n  ROCKSDB_INCLUDE_DIR: ");
-        output.push_str(&yaml_string(&rocksdb.include_dir)?);
-        output.push_str("\n  LD_LIBRARY_PATH: ");
-        output.push_str(&yaml_string(&rocksdb.library_dir)?);
-        output.push('\n');
+        output.push_str("\n    readOnly: true\n");
+    }
+    let mut environment = vec![
+        ("CARGO_HOME", "/home/agent/.cargo".to_owned()),
+        ("RUSTUP_HOME", "/home/agent/.rustup".to_owned()),
+    ];
+    if matches!(kind, Kind::Development(_) | Kind::Isolated(_)) {
+        environment.push(("PASEO_HOME", "/home/agent/.paseo".to_owned()));
+    }
+    if matches!(
+        kind,
+        Kind::Development(Preset::MultiAgent) | Kind::Isolated(Preset::MultiAgent)
+    ) {
+        environment.push(("PI_SKIP_VERSION_CHECK", "1".to_owned()));
+        environment.push(("PI_TELEMETRY", "0".to_owned()));
+    }
+    if let Some(rocksdb) = rocksdb {
+        environment.push(("SNAPPY_LIB_DIR", "/opt/rust-sbx-system-libs".to_owned()));
+        environment.push(("ROCKSDB_LIB_DIR", rocksdb.library_dir.clone()));
+        environment.push(("ROCKSDB_INCLUDE_DIR", rocksdb.include_dir.clone()));
+        environment.push(("LD_LIBRARY_PATH", rocksdb.library_dir.clone()));
+    }
+    if !environment.is_empty() {
+        output.push_str("env:\n");
+        for (name, value) in environment {
+            output.push_str("  ");
+            output.push_str(name);
+            output.push_str(": ");
+            output.push_str(&yaml_string(&value)?);
+            output.push('\n');
+        }
     }
     Ok(output)
 }
 
-pub(crate) fn selected_kits(
+pub(crate) fn selected_local_kits(
     context: &Context,
     kind: Kind,
     rocksdb: bool,
@@ -521,16 +555,14 @@ pub(crate) fn selected_kits(
 ) -> Vec<PathBuf> {
     let mut kits = vec![context.kit_root.join("rust")];
     if let Kind::Development(preset) | Kind::Isolated(preset) = kind {
+        kits.push(context.kit_root.join("node-runtime"));
         kits.push(context.kit_root.join("host-shell"));
         kits.push(context.kit_root.join("git-ssh-sign"));
         kits.push(context.kit_root.join("github-ssh"));
-        if preset == Preset::Codex {
-            kits.push(context.kit_root.join("github-proxy-codex"));
-        } else if preset == Preset::Claude {
-            kits.push(context.kit_root.join("github-proxy-claude"));
+        if profile.github_proxy {
+            kits.push(context.kit_root.join("github-proxy"));
         }
         if preset == Preset::MultiAgent {
-            kits.push(context.kit_root.join("claude-cli"));
             kits.push(context.kit_root.join("pi-cli"));
         }
         kits.push(context.kit_root.join("paseo-cli"));
@@ -552,16 +584,37 @@ pub(crate) fn selected_kits(
     kits
 }
 
-pub(crate) fn agent_name(preset: Preset, profile: &Profile) -> &'static str {
-    if profile.github_proxy {
-        match preset {
-            Preset::Codex => "sbxr-codex-github",
-            Preset::Claude => "sbxr-claude-github",
-            Preset::MultiAgent => "sbxr-multi-agent",
+pub(crate) fn selected_kit_references(
+    context: &Context,
+    kind: Kind,
+    rocksdb: bool,
+    profile: &Profile,
+) -> Result<Vec<String>, String> {
+    let mut kits = vec![match kind {
+        Kind::Development(Preset::Claude) | Kind::Isolated(Preset::Claude) => {
+            CLAUDE_WORKLOAD.to_owned()
         }
-    } else {
-        preset.primary_agent()
+        Kind::Development(_) | Kind::Isolated(_) => CODEX_WORKLOAD.to_owned(),
+        Kind::Review => SHELL_WORKLOAD.to_owned(),
+    }];
+    if matches!(
+        kind,
+        Kind::Development(Preset::MultiAgent) | Kind::Isolated(Preset::MultiAgent)
+    ) {
+        kits.push(CLAUDE_MIXIN.to_owned());
     }
+    for kit in selected_local_kits(context, kind, rocksdb, profile) {
+        kits.push(
+            kit.to_str()
+                .ok_or_else(|| format!("kit path is not valid UTF-8: {}", kit.display()))?
+                .to_owned(),
+        );
+    }
+    Ok(kits)
+}
+
+pub(crate) fn agent_name(preset: Preset) -> &'static str {
+    preset.primary_agent()
 }
 
 fn contract_hash(
@@ -574,7 +627,10 @@ fn contract_hash(
     let mut input = b"sbxr-environment-contract-v1\0".to_vec();
     append_contract_part(&mut input, definition);
     append_contract_part(&mut input, &crate::profile::contract_bytes(profile)?);
-    for kit in selected_kits(context, kind, rocksdb.is_some(), profile) {
+    for kit in selected_kit_references(context, kind, rocksdb.is_some(), profile)? {
+        append_contract_part(&mut input, kit.as_bytes());
+    }
+    for kit in selected_local_kits(context, kind, rocksdb.is_some(), profile) {
         append_contract_part(&mut input, kit.as_os_str().as_encoded_bytes());
         for file in kit_contract_files(&kit)? {
             let relative = file.strip_prefix(&kit).map_err(|error| {
@@ -921,12 +977,14 @@ mod tests {
             &profile,
         )
         .unwrap();
-        assert!(development.contains("/trusted/kits/claude-cli"));
+        assert!(development.contains(CODEX_WORKLOAD));
+        assert!(development.contains(CLAUDE_MIXIN));
+        assert!(development.contains("/trusted/kits/node-runtime"));
         assert!(development.contains("/trusted/kits/pi-cli"));
         assert!(!development.contains("codex-cli"));
         assert!(development.contains("secrets:\n  github:"));
         assert!(!development.contains("ghp_"));
-        assert!(development.contains("agent: \"sbxr-multi-agent\""));
+        assert!(development.contains("agent: \"codex\""));
         assert!(development.contains("bindings:\n  openai:\n    oauth:"));
         assert!(development.contains("- auth.openai.com"));
         assert!(development.contains("- chatgpt.com"));
@@ -937,7 +995,9 @@ mod tests {
 
         let review = render(&context, &project, Kind::Review, None, &profile).unwrap();
         assert!(review.contains("agent: \"shell\""));
+        assert!(review.contains(SHELL_WORKLOAD));
         assert!(review.contains("clone: true"));
+        assert!(!review.contains("node-runtime"));
         assert!(!review.contains("github-ssh"));
         assert!(!review.contains("claude-cli"));
         assert!(!review.contains("bindings:"));
@@ -983,10 +1043,11 @@ mod tests {
         ));
         for kit in [
             "rust",
+            "node-runtime",
             "host-shell",
             "git-ssh-sign",
             "github-ssh",
-            "github-proxy-codex",
+            "github-proxy",
             "paseo-cli",
             "vscode-remote",
         ] {
@@ -1139,10 +1200,11 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         for kit in [
             "rust",
+            "node-runtime",
             "host-shell",
             "git-ssh-sign",
             "github-ssh",
-            "github-proxy-codex",
+            "github-proxy",
             "paseo-cli",
             "vscode-remote",
         ] {
@@ -1220,7 +1282,7 @@ mod tests {
         .unwrap();
         assert_eq!(inspection.source, "prospective (not written)");
         assert!(inspection.contract_status.starts_with("not materialized"));
-        assert!(inspection.yaml.contains("agent: \"sbxr-codex-github\""));
+        assert!(inspection.yaml.contains("agent: \"codex\""));
         assert!(!context.state_root.exists());
         fs::remove_dir_all(root).unwrap();
     }
@@ -1236,10 +1298,11 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         for kit in [
             "rust",
+            "node-runtime",
             "host-shell",
             "git-ssh-sign",
             "github-ssh",
-            "github-proxy-codex",
+            "github-proxy",
             "paseo-cli",
             "vscode-remote",
         ] {

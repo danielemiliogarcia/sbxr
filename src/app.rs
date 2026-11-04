@@ -200,7 +200,7 @@ fn dispatch(
         Action::AuthImport(_) => auth::import(context, project, preset, rocksdb)?,
         Action::AuthStatus(_) => {
             sandbox::ensure_dev(context, project, preset, rocksdb, profile, false, force)?;
-            auth::show_status(context, name, preset);
+            auth::show_status(context, name, preset)?;
         }
         Action::Audit(_) => sandbox::audit(context, project, preset, rocksdb, profile, force)?,
         Action::Verify(_) => verify::run(context, project, preset, profile)?,

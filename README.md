@@ -34,7 +34,7 @@ directory above; an empty directory is initialized with Cargo automatically.
 
 - A host supported by [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/install/),
   with the required virtualization support (KVM on Linux).
-- Docker Sandboxes `sbx` 0.39.0 or newer. Follow Docker's official
+- Docker Sandboxes `sbx` 0.51.0 or newer (required for Kits v3). Follow Docker's official
   [installation and sign-in guide](https://docs.docker.com/ai/sandboxes/install/).
   Docker Desktop and Docker Engine are not required just to use `sbx`.
 - Rust and Cargo 1.85 or newer to build and install `sbxr` from source.
@@ -60,18 +60,19 @@ To build `sbxr` or contribute a feature, see the
 
 The default `rust-multi-agent` preset combines:
 
-- an sbxr multi-agent kit extending Docker's official `codex` agent, with
-  host-managed ChatGPT subscription OAuth;
+- Docker's digest-pinned official Kits v3 Codex workload and Claude mixin,
+  with host-managed ChatGPT and Claude subscription OAuth;
 - pinned Rust tooling, Cargo security tools, and a colored Git-aware Bash
   prompt, plus `nano`, Bash/Git completion, and a generated `en_US.UTF-8`
   locale for clean VS Code terminals;
-- pinned Claude Code with Docker host-managed Claude subscription OAuth;
+- the native Claude Code binary shipped by Docker's official Claude mixin;
 - pinned Pi, connected to the Docker-managed Codex and Claude OAuth proxies;
 - the pinned Paseo CLI and a loopback-only Paseo daemon that host Paseo clients
   reach over the sandbox SSH transport;
-- committed npm lockfiles for Claude, Pi, and Paseo; installation uses
-  `npm ci --ignore-scripts` so transitive resolution cannot drift during the
-  first sandbox bootstrap;
+- checksum-pinned Node.js 22.23.4 plus committed npm lockfiles for Pi and
+  Paseo (and the optional browser); installation uses `npm ci
+  --ignore-scripts` so runtime and transitive package resolution cannot drift
+  during the first sandbox bootstrap;
 - GitHub HTTPS/API access through Docker's host credential proxy, with only a
   non-reusable sentinel in the guest; forwarded GitHub SSH remains available;
 - protected per-project profiles, redacted diagnostic reports, and staged
@@ -128,7 +129,7 @@ orchestration.
 | `sbxr stop .` | Stop while preserving state |
 | `sbxr rm .` | Remove sandbox-local state; host files remain |
 | `sbxr rm --force .` | Remove even while VS Code/SSH is connected |
-| `sbxr setup` | Configure missing Docker login, OpenAI OAuth, and Remote-SSH |
+| `sbxr setup` | Configure missing Docker login, provider OAuth, and Remote-SSH |
 | `sbxr doctor [PATH]` | Diagnose the host; with a project compare host/guest versions |
 | `sbxr --version` | Print the installed sbxr version |
 
@@ -256,8 +257,10 @@ shows the authoritative file stored under protected host state.
 `sbxr verify` operates on an existing sandbox. It validates Docker's reported
 agent, selected kits, empty runtime-mount list, and workspace; audits known
 Codex, Claude, Pi, GitHub, Docker, and VS Code credential stores for reusable
-values; verifies pinned tool versions; and checks the forwarded SSH agent
-without printing public keys. It never scans project files or deletes findings.
+values; performs a real, non-generation Anthropic API request through the
+sentinel proxy; verifies pinned tool versions; and checks the forwarded SSH
+agent without printing public keys. It never scans project files or deletes
+findings.
 
 Lifecycle commands write a redacted JSON report under
 `$SBXR_STATE_ROOT/diagnostics`. Reports contain stage/status categories only:
@@ -320,12 +323,14 @@ registered as `sbxr-browser` after trusted Codex configuration mirroring.
 
 `sbxr orca .` enables the optional Orca kit in the protected project profile,
 installs the checksum-pinned Orca 1.4.247 AppImage by extracting it without
-FUSE, starts `orca serve` as the unprivileged sandbox user, and prints its
-pairing URL. The server is published only to a deterministic host loopback
-port, and sbxr rewrites the endpoint embedded in the pairing payload to that
-published port. Paste the URL into Orca Desktop under **Settings → Remote Orca
-Servers → Add Server**. Treat the pairing URL as a secret and do not publish
-the loopback port through a public tunnel.
+FUSE, installs its guest-only headless prerequisites including Xvfb and
+`xauth`, starts `orca serve` as the unprivileged sandbox user, and prints its
+pairing URL. Re-running the command repairs missing prerequisites without
+downloading an already verified AppImage again. The server is published only
+to a deterministic host loopback port, and sbxr rewrites the endpoint embedded
+in the pairing payload to that published port. Paste the URL into Orca Desktop
+under **Settings → Remote Orca Servers → Add Server**. Treat the pairing URL as
+a secret and do not publish the loopback port through a public tunnel.
 
 Both integrations are disabled by default and become creation-time contract
 inputs when enabled.
@@ -368,9 +373,10 @@ That ready-to-code experience includes:
 - `nano` as a working Git editor, Bash/Git completion, mirrored Git author
   identity and signing defaults, GitHub push/pull through the host SSH agent,
   and SSH signatures when requested by that policy or `-S`;
-- installed Codex, Claude, and Pi extensions/plugins plus instructions, skills,
-  hooks, prompts, themes, and status-line customizations mirrored from the
-  trusted host profile;
+- installed Codex, Claude, and Pi extensions/plugins plus instructions, hooks,
+  prompts, themes, and status-line customizations mirrored from the trusted
+  host profile; Docker's environment-provided shared agent skills stay on
+  their read-only guest mounts;
 - compatible host VS Code extensions installed at matching versions in the
   remote extension host, with server-side verification and retries;
 - the normal development folder opened without a redundant Workspace Trust
@@ -481,10 +487,11 @@ separate kit checkout.
 
 ## Host setup behavior
 
-`sbxr setup` is idempotent. It requires Docker Sandboxes 0.39.0 or newer,
+`sbxr setup` is idempotent. It requires Docker Sandboxes 0.51.0 or newer,
 detects and configures missing
 interactive prerequisites: Docker sign-in, host-managed OpenAI OAuth for
-presets that use Codex, Docker-managed `*.sbx` SSH configuration, and the VS
+presets that use Codex, the presence of Docker-managed Anthropic OAuth for
+presets that use Claude, Docker-managed `*.sbx` SSH configuration, and the VS
 Code Remote-SSH extension. Those steps may
 open a browser or download the extension. It verifies the result of each
 command and continues far enough to report multiple problems together. It
@@ -505,6 +512,7 @@ code --install-extension ms-vscode-remote.remote-ssh
 |---|---|
 | `sbx` installed but Docker sign-in or readiness is missing | Runs `sbx login`, then verifies with `sbx ls` |
 | OpenAI OAuth missing for `rust-multi-agent` or `rust-codex` | Runs the browser-based OAuth command, then verifies it |
+| Anthropic OAuth missing for `rust-multi-agent` or `rust-claude` | Explains the one-time proxy-captured `/login` flow; no host Claude credential is copied |
 | Docker `*.sbx` SSH configuration | Safely reruns `sbx setup ssh` to refresh/verify it |
 | VS Code installed but Remote-SSH missing | Installs the Microsoft extension, then verifies it |
 | `sbx`, VS Code, OpenSSH, or KVM missing | Prints installation guidance and exits non-zero |
@@ -530,9 +538,10 @@ plugins/settings/hooks, or VS Code extensions change and should be re-mirrored
 deliberately. If an older or externally-created same-name sandbox has no
 verifiable environment-contract marker, `sbxr` refuses to reconcile it and
 prints explicit `sbxr rm`/`sbxr new` commands. It never silently destroys or
-adopts that sandbox. The contract covers the rendered environment and the
-contents of every selected local kit, so a kit update also requires explicit
-recreation instead of silently reusing stale provisioning.
+adopts that sandbox. The contract covers the rendered environment, every
+digest-pinned official workload/mixin reference, and the contents of every
+selected local kit, so a kit update also requires explicit recreation instead
+of silently reusing stale provisioning.
 
 With VS Code's persistent-terminal settings enabled (the default), terminal
 tabs and scrollback reconnect or revive when possible. Stopping or removing the
@@ -598,11 +607,13 @@ documented configuration tree, plus useful host configuration: instructions,
 skills, hooks, prompts, status-line scripts (including a script referenced from
 Claude's `statusLine.command`), themes, and plugin metadata/cache. Codex and
 Claude plugin caches are copied; Pi source extensions are copied and Pi npm
-extension packages are reinstalled at the exact versions in the host lockfile.
-It excludes authentication files, histories, sessions, logs, project trust
-records, runtime state, and Codex system-managed skills. Host paths in copied
-text are rewritten to `/home/agent`, while Docker-managed provider and safety
-settings win during merges.
+extension packages are resolved inside the sandbox from the semver ranges in
+the trusted host `package.json`, with lifecycle scripts disabled. The host
+lockfile is deliberately not reused because it targets the host's Pi release.
+The mirror excludes authentication files, histories, sessions, logs, project
+trust records, runtime state, and Codex system-managed skills. Host paths in
+copied text are rewritten to `/home/agent`, while Docker-managed provider and
+safety settings win during merges.
 
 Before merging Claude settings, `sbxr` checks simple host hook commands against
 the sandbox. The recognized `rtk hook claude` integration is mirrored from the
@@ -672,8 +683,8 @@ mirror them from a trusted host profile.
 - `src/sandbox.rs`: development/review orchestration, remote commands, and
   Cargo audits on top of declarative lifecycle;
 - `src/host.rs`: setup, preflight checks, and diagnostics;
-- `src/auth.rs`: credential-import offer, explicit import, and subscription
-  status;
+- `src/auth.rs`: disabled legacy credential import, subscription status, and
+  proxy-route verification;
 - `src/sign.rs`: host-only OpenPGP commit signing;
 - `src/verify.rs`: redacted runtime and guest-credential verification;
 - `src/node_tools.rs`: embedded lockfile upload, exact Node-tool installation,
@@ -705,8 +716,8 @@ validation status, see [PLATFORM_SUPPORT.md](PLATFORM_SUPPORT.md).
 
 ## Limitations
 
-Docker's `.sbxenv.yaml`/`sbx env` interface is experimental in Docker
-Sandboxes 0.39. `sbxr` centralizes that dependency, but a future Docker release
+Docker's `.sbxenv.yaml`/`sbx env` and Kits v3 interfaces remain evolving in
+Docker Sandboxes 0.51. `sbxr` centralizes those dependencies, but a future Docker release
 may require a compatibility update.
 
 After a microVM stop, VS Code Remote-SSH may restore terminal tabs but lose their scrollback due to a VS Code limitation/bug; [details and tested versions](PLATFORM_SUPPORT.md#vscode-state-across-a-microvm-stop).

@@ -1,9 +1,12 @@
 use std::fs;
 use std::path::Path;
 
-const KITS: [(&str, &str); 14] = [
+const KITS: [(&str, &str); 13] = [
     ("rust", include_str!("../kits/rust/spec.yaml")),
-    ("claude-cli", include_str!("../kits/claude-cli/spec.yaml")),
+    (
+        "node-runtime",
+        include_str!("../kits/node-runtime/spec.yaml"),
+    ),
     ("pi-cli", include_str!("../kits/pi-cli/spec.yaml")),
     ("paseo-cli", include_str!("../kits/paseo-cli/spec.yaml")),
     ("host-shell", include_str!("../kits/host-shell/spec.yaml")),
@@ -21,29 +24,15 @@ const KITS: [(&str, &str); 14] = [
     ),
     ("github-ssh", include_str!("../kits/github-ssh/spec.yaml")),
     (
-        "github-proxy-codex",
-        include_str!("../kits/github-proxy-codex/spec.yaml"),
-    ),
-    (
-        "github-proxy-claude",
-        include_str!("../kits/github-proxy-claude/spec.yaml"),
+        "github-proxy",
+        include_str!("../kits/github-proxy/spec.yaml"),
     ),
     ("ghcr", include_str!("../kits/ghcr/spec.yaml")),
     ("browser", include_str!("../kits/browser/spec.yaml")),
     ("orca-server", include_str!("../kits/orca-server/spec.yaml")),
 ];
 
-const KIT_ASSETS: [(&str, &str, &[u8]); 8] = [
-    (
-        "claude-cli",
-        "files/opt/sbxr-tools/claude/package.json",
-        include_bytes!("../kits/claude-cli/files/opt/sbxr-tools/claude/package.json"),
-    ),
-    (
-        "claude-cli",
-        "files/opt/sbxr-tools/claude/package-lock.json",
-        include_bytes!("../kits/claude-cli/files/opt/sbxr-tools/claude/package-lock.json"),
-    ),
+const KIT_ASSETS: [(&str, &str, &[u8]); 6] = [
     (
         "pi-cli",
         "files/opt/sbxr-tools/pi/package.json",
@@ -76,9 +65,9 @@ const KIT_ASSETS: [(&str, &str, &[u8]); 8] = [
     ),
 ];
 
-pub(crate) const KIT_NAMES: [&str; 14] = [
+pub(crate) const KIT_NAMES: [&str; 13] = [
     "rust",
-    "claude-cli",
+    "node-runtime",
     "pi-cli",
     "paseo-cli",
     "host-shell",
@@ -86,19 +75,13 @@ pub(crate) const KIT_NAMES: [&str; 14] = [
     "vscode-remote",
     "git-ssh-sign",
     "github-ssh",
-    "github-proxy-codex",
-    "github-proxy-claude",
+    "github-proxy",
     "ghcr",
     "browser",
     "orca-server",
 ];
 
-pub(crate) const KIT_ASSET_PATHS: [(&str, &str); 8] = [
-    ("claude-cli", "files/opt/sbxr-tools/claude/package.json"),
-    (
-        "claude-cli",
-        "files/opt/sbxr-tools/claude/package-lock.json",
-    ),
+pub(crate) const KIT_ASSET_PATHS: [(&str, &str); 6] = [
     ("pi-cli", "files/opt/sbxr-tools/pi/package.json"),
     ("pi-cli", "files/opt/sbxr-tools/pi/package-lock.json"),
     ("paseo-cli", "files/opt/sbxr-tools/paseo/package.json"),
@@ -132,4 +115,31 @@ pub fn materialize(kit_root: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_embedded_kit_uses_the_v3_mixin_contract() {
+        for (name, descriptor) in KITS {
+            assert!(
+                descriptor.starts_with("# syntax=docker/sandbox-kit:3\n"),
+                "{name} has no Kits v3 frontend"
+            );
+            assert!(
+                descriptor.contains("schemaVersion: \"3\"\n"),
+                "{name} has no v3 schema"
+            );
+            assert!(
+                descriptor.contains("kind: mixin\n"),
+                "{name} is not a v3 mixin"
+            );
+            assert!(
+                !descriptor.lines().any(|line| line.starts_with("name:")),
+                "{name} retained the removed v2 top-level name"
+            );
+        }
+    }
 }

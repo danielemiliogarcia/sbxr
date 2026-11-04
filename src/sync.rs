@@ -29,7 +29,6 @@ const CLAUDE_PATHS: &[&str] = &[
     ".claude/hooks",
     ".claude/commands",
     ".claude/agents",
-    ".claude/skills",
     ".claude/output-styles",
     ".claude/plugins/cache",
     ".claude/plugins/marketplaces",
@@ -1257,5 +1256,10 @@ mod tests {
         });
         assert!(settings_uses_hook_program(&settings, "rtk"));
         assert!(!settings_uses_hook_program(&settings, "paplay"));
+    }
+
+    #[test]
+    fn leaves_docker_owned_claude_skills_mount_read_only() {
+        assert!(!CLAUDE_PATHS.contains(&".claude/skills"));
     }
 }
