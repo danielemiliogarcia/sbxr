@@ -1,0 +1,28 @@
+# syntax=docker/sandbox-kit:3
+schemaVersion: "3"
+kind: mixin
+version: "1.0.0"
+displayName: GitHub HTTPS and API proxy
+description: Provides host-proxied GitHub HTTPS and API authentication without copying the token into the guest.
+sourceUrl: https://github.com/danielemiliogarcia/sbxr
+
+capabilities:
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      runtime:
+        allow:
+          - api.github.com:443
+          - github.com:443
+          - release-assets.githubusercontent.com:443
+  - type: com.docker.sandbox/credential@1
+    optional: true
+    description: GitHub token kept behind the Docker host proxy
+    config:
+      service: github
+      phase: runtime
+      apiKey:
+        name: GH_TOKEN
+        proxyManaged: true
+        inject:
+          - {domain: api.github.com, header: Authorization, format: "Bearer %s"}
+          - {domain: github.com, scheme: basic, username: x-access-token}

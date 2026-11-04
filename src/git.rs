@@ -1,5 +1,6 @@
 use crate::environment::Context;
 use crate::{process, sbx, sync};
+use std::ffi::OsStr;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -41,8 +42,163 @@ pub(crate) fn configure(
 ) -> Result<(), String> {
     ensure_github_policy(context, sandbox_name)?;
     install_sandbox_git_integration(context, sandbox_name)?;
+    configure_cargo_git_cli(context, sandbox_name)?;
+    mirror_host_github_rewrites(context, sandbox_name, project)?;
     mirror_host_git_settings(context, sandbox_name, project)?;
     Ok(())
+}
+
+fn configure_cargo_git_cli(context: &Context, sandbox_name: &str) -> Result<(), String> {
+    let path = "/home/agent/.cargo/config.toml";
+    let current = sbx::read_file(context.preserve_xdg_state, sandbox_name, path)?;
+    let current = match current {
+        Some(contents) => String::from_utf8(contents)
+            .map_err(|error| format!("sandbox Cargo config is not UTF-8: {error}"))?,
+        None => String::new(),
+    };
+    let updated = cargo_config_with_git_cli(&current);
+    if updated.trim_end() != current.trim_end() {
+        sbx::write_file(
+            context.preserve_xdg_state,
+            sandbox_name,
+            path,
+            OsStr::new(&updated),
+        )?;
+        println!("==> configured Cargo Git dependencies to use the forwarded SSH agent");
+    }
+    Ok(())
+}
+
+fn cargo_config_with_git_cli(contents: &str) -> String {
+    let mut lines = contents.lines().map(str::to_owned).collect::<Vec<_>>();
+    let mut section = "";
+    let mut net_header = None;
+    let mut setting = None;
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            section = trimmed;
+            if section == "[net]" {
+                net_header = Some(index);
+            }
+            continue;
+        }
+        let key = trimmed.split_once('=').map(|(key, _)| key.trim());
+        if (section.is_empty() && key == Some("net.git-fetch-with-cli"))
+            || (section == "[net]" && key == Some("git-fetch-with-cli"))
+        {
+            setting = Some((index, section.is_empty()));
+            break;
+        }
+    }
+    if let Some((index, dotted)) = setting {
+        let indentation = lines[index]
+            .chars()
+            .take_while(|character| character.is_whitespace())
+            .collect::<String>();
+        let key = if dotted {
+            "net.git-fetch-with-cli"
+        } else {
+            "git-fetch-with-cli"
+        };
+        lines[index] = format!("{indentation}{key} = true");
+    } else if let Some(index) = net_header {
+        lines.insert(index + 1, "git-fetch-with-cli = true".to_owned());
+    } else {
+        if lines.last().is_some_and(|line| !line.trim().is_empty()) {
+            lines.push(String::new());
+        }
+        lines.extend(["[net]".to_owned(), "git-fetch-with-cli = true".to_owned()]);
+    }
+    lines.join("\n")
+}
+
+fn mirror_host_github_rewrites(
+    context: &Context,
+    sandbox_name: &str,
+    project: &Path,
+) -> Result<(), String> {
+    let rewrites = host_github_ssh_rewrites(project)?;
+    for (key, value) in &rewrites {
+        let script = r#"set -eu
+key=$1
+value=$2
+if git config --global --get-all "$key" 2>/dev/null | grep -F -x -- "$value" >/dev/null; then
+  exit 0
+fi
+git config --global --add "$key" "$value"
+"#;
+        process::run_checked(
+            sbx::exec_command(context.preserve_xdg_state)
+                .arg(sandbox_name)
+                .arg("--")
+                .args(["sh", "-c", script, "sh", key, value]),
+            "mirroring a safe GitHub HTTPS-to-SSH rewrite",
+        )?;
+    }
+    if !rewrites.is_empty() {
+        println!(
+            "==> mirrored {} safe GitHub HTTPS-to-SSH rewrite(s)",
+            rewrites.len()
+        );
+    }
+    Ok(())
+}
+
+fn host_github_ssh_rewrites(project: &Path) -> Result<Vec<(String, String)>, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(project)
+        .args(["config", "--get-regexp", r"^url\..*\.insteadof$"])
+        .output()
+        .map_err(|error| format!("could not inspect host Git URL rewrites: {error}"))?;
+    if output.status.code() == Some(1) {
+        return Ok(Vec::new());
+    }
+    if !output.status.success() {
+        return Err(format!(
+            "could not inspect host Git URL rewrites: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let text = String::from_utf8(output.stdout)
+        .map_err(|error| format!("host Git URL rewrites are not UTF-8: {error}"))?;
+    let mut rewrites = text
+        .lines()
+        .filter_map(|line| line.split_once(char::is_whitespace))
+        .filter_map(|(key, value)| safe_github_ssh_rewrite(key, value.trim_start()))
+        .collect::<Vec<_>>();
+    rewrites.sort();
+    rewrites.dedup();
+    Ok(rewrites)
+}
+
+fn safe_github_ssh_rewrite(key: &str, instead_of: &str) -> Option<(String, String)> {
+    let base = key.strip_prefix("url.")?.strip_suffix(".insteadof")?;
+    let https_suffix = instead_of.strip_prefix("https://github.com/")?;
+    let ssh_suffix = base
+        .strip_prefix("git@github.com:")
+        .or_else(|| base.strip_prefix("ssh://git@github.com/"))?;
+    if https_suffix != ssh_suffix || !safe_github_path_suffix(https_suffix) {
+        return None;
+    }
+    Some((key.to_owned(), instead_of.to_owned()))
+}
+
+fn safe_github_path_suffix(value: &str) -> bool {
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/'))
+    {
+        return false;
+    }
+    let trimmed = value.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return value.is_empty();
+    }
+    trimmed
+        .split('/')
+        .all(|segment| !segment.is_empty() && !matches!(segment, "." | ".."))
 }
 
 fn ensure_github_policy(context: &Context, sandbox_name: &str) -> Result<(), String> {
@@ -341,5 +497,64 @@ mod tests {
         assert!(signing_format_is_forwardable("SSH"));
         assert!(!signing_format_is_forwardable("openpgp"));
         assert!(!signing_format_is_forwardable("x509"));
+    }
+
+    #[test]
+    fn accepts_only_same_scope_github_https_to_ssh_rewrites() {
+        assert_eq!(
+            safe_github_ssh_rewrite(
+                "url.git@github.com:FairgateLabs/.insteadof",
+                "https://github.com/FairgateLabs/",
+            ),
+            Some((
+                "url.git@github.com:FairgateLabs/.insteadof".to_owned(),
+                "https://github.com/FairgateLabs/".to_owned(),
+            ))
+        );
+        assert!(
+            safe_github_ssh_rewrite("url.ssh://git@github.com/.insteadof", "https://github.com/")
+                .is_some()
+        );
+        assert!(
+            safe_github_ssh_rewrite(
+                "url.git@github.com:Other/.insteadof",
+                "https://github.com/FairgateLabs/"
+            )
+            .is_none()
+        );
+        assert!(
+            safe_github_ssh_rewrite(
+                "url.file:///tmp/.insteadof",
+                "https://github.com/FairgateLabs/"
+            )
+            .is_none()
+        );
+        assert!(
+            safe_github_ssh_rewrite(
+                "url.git@evil.example:FairgateLabs/.insteadof",
+                "https://github.com/FairgateLabs/"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn enables_cargo_git_cli_without_discarding_other_configuration() {
+        assert_eq!(
+            cargo_config_with_git_cli(""),
+            "[net]\ngit-fetch-with-cli = true"
+        );
+        assert_eq!(
+            cargo_config_with_git_cli("[build]\njobs = 4"),
+            "[build]\njobs = 4\n\n[net]\ngit-fetch-with-cli = true"
+        );
+        assert_eq!(
+            cargo_config_with_git_cli("[net]\nretry = 3\ngit-fetch-with-cli = false"),
+            "[net]\nretry = 3\ngit-fetch-with-cli = true"
+        );
+        assert_eq!(
+            cargo_config_with_git_cli("net.git-fetch-with-cli = false\n[build]\njobs = 4"),
+            "net.git-fetch-with-cli = true\n[build]\njobs = 4"
+        );
     }
 }

@@ -139,6 +139,7 @@ pub(crate) struct Project {
     pub(crate) path: PathBuf,
     pub(crate) name: String,
     pub(crate) review_name: String,
+    pub(crate) isolated_name: String,
 }
 
 impl Project {
@@ -174,9 +175,13 @@ impl Project {
         let hash = sha256::hex_prefix(&identity, 4);
         let feature = if rocksdb.is_some() { "-rdb" } else { "" };
         let generated = format!("rust-{}{feature}-{base}-{hash}", preset.slug());
-        let name = env::var("SBXR_NAME").unwrap_or(generated);
+        let overridden = env::var("SBXR_NAME").ok();
+        let name = overridden.clone().unwrap_or(generated);
+        let isolated_name = overridden
+            .unwrap_or_else(|| format!("rust-isolated-{}{feature}-{base}-{hash}", preset.slug()));
         Ok(Self {
             review_name: format!("rust-review{feature}-{base}-{hash}"),
+            isolated_name,
             path,
             name,
         })

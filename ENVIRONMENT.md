@@ -18,8 +18,6 @@ over equivalent environment variables.
 | `SBXR_SYNC_VSCODE_EXTENSIONS` | `0` to disable | Host VS Code extension mirroring is enabled |
 | `SBXR_SYNC_PI_EXTENSIONS` | `0` or `1` | Unset/`1` mirrors raw Pi source extensions; `0` omits them |
 | `SBXR_SYNC_HOST_SHELL` | `0` to disable | Host Bash aliases and the `~/bin` utility directory are mirrored |
-| `SBXR_CLAUDE_AUTH_FILE` | File path | `~/.claude/.credentials.json`; used by the first-open import offer and `auth-import` |
-| `SBXR_YES` | `1` to confirm | Automatically accepts the first-open Claude import offer and non-interactive `auth-import` |
 | `SBXR_PRESERVE_XDG_STATE_HOME` | `1` to preserve | `XDG_STATE_HOME` is removed from child `sbx` and VS Code commands |
 
 Values other than the documented control value generally behave like the
@@ -94,7 +92,36 @@ On Unix, `sbxr` protects directories with mode `0700` and files with `0600`,
 uses atomic replacement, and rejects symlinked authoritative path components
 and files. The
 generated environment contains paths and kit references but no OAuth tokens,
-private keys, literal secrets, or host secret commands.
+private keys, or literal secrets. GitHub/GHCR declarations may contain the
+fixed absolute host command `/usr/bin/gh auth token`; Docker executes it on the
+host and exposes only its proxy sentinel, never the command output, to guests.
+
+## Protected project profiles and direct options
+
+Optional settings are command-line/profile inputs rather than environment
+variables. They can appear before or after the command:
+
+```bash
+sbxr --wizard .
+sbxr --memory 8g --cpus 4 --browser new -y .
+sbxr --isolated --network restricted up -y .
+sbxr --config /trusted/team-profile.json up -y .
+```
+
+`--wizzard` is retained as a spelling alias for `--wizard`. Direct flags and
+the wizard save a validated version-1 JSON file below
+`$SBXR_STATE_ROOT/profiles`. Allowed settings are `workspace`, `network`,
+`githubProxy: true`, `integrations.browser`, `integrations.orca`,
+`integrations.ghcr`, and `resources.memory/cpus/rootDisk/dockerDisk`. Unknown
+keys, secret-looking keys, malformed types, unsafe sizes, excessive CPU/memory,
+and unsafe disk budgets are rejected. External `--config` files are parsed
+with the same schema and copied into protected state; profiles must never
+contain credentials.
+
+`--root-disk` and `--docker-disk` are passed to Docker Sandboxes only for the
+environment lifecycle command. Memory and CPU limits are declared in the
+environment file. All four values are contract inputs and require explicit
+recreation when changed.
 
 ## Optional RocksDB acceleration
 
@@ -154,28 +181,6 @@ SBXR_SYNC_HOST_SHELL=0 sbxr update .
 
 Mirrored host utilities are appended to `PATH`, so a sandbox-managed toolchain
 of the same name keeps priority. `~/bin/.git` is never copied.
-
-## Authentication import variables
-
-`SBXR_CLAUDE_AUTH_FILE` selects a trusted host Claude OAuth cache for the
-first-open import offer and the explicit `auth-import` command:
-
-```bash
-SBXR_CLAUDE_AUTH_FILE=/secure/path/claude-credentials.json \
-  sbxr auth-import .
-```
-
-`SBXR_YES=1` bypasses the interactive warning for automation:
-
-```bash
-SBXR_YES=1 sbxr auth-import .
-```
-
-This copies Claude refresh credentials into the project sandbox. Code, build
-scripts, procedural macros, and agents running as the sandbox user can read
-them. Use `SBXR_YES=1` only for an already trusted project and automation
-environment. Codex OAuth is host-managed by Docker and is never selected with
-these variables.
 
 ## `XDG_STATE_HOME` compatibility
 

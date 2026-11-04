@@ -70,6 +70,15 @@ pub(crate) fn setup(preset: Preset, preserve_xdg_state: bool) -> Result<(), Stri
                 Err(error) => failures.push(error),
             }
         }
+        if preset.has_claude() {
+            match anthropic_oauth_configured(preserve_xdg_state) {
+                Ok(true) => println!("ok   Docker host-managed Anthropic OAuth"),
+                Ok(false) => println!(
+                    "WARN Anthropic OAuth is not yet in Docker's host store; after creating a sandbox, run `sbxr claude .` and `/login` once so Docker can capture it behind the proxy"
+                ),
+                Err(error) => failures.push(error),
+            }
+        }
         if let Err(error) = sbx::require_minimum_version(preserve_xdg_state) {
             failures.push(error);
         } else if let Err(error) = sbx::setup_ssh(preserve_xdg_state) {
@@ -123,6 +132,28 @@ pub(crate) fn setup(preset: Preset, preserve_xdg_state: bool) -> Result<(), Stri
         println!("{}", process::install_hint("git"));
     }
 
+    if process::command_exists("gh") {
+        let authenticated = Command::new("gh")
+            .args(["auth", "status", "--hostname", "github.com"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if authenticated {
+            println!("ok   GitHub CLI host authentication for the sandbox proxy");
+        } else {
+            println!("==> GitHub CLI is not authenticated; starting `gh auth login`");
+            if let Err(error) = process::run_checked(
+                Command::new("gh").args(["auth", "login", "--hostname", "github.com"]),
+                "GitHub CLI login",
+            ) {
+                failures.push(error);
+            }
+        }
+    } else {
+        failures.push(format!("gh is missing\n{}", process::install_hint("gh")));
+    }
+
     if cfg!(target_os = "linux") {
         if fs::OpenOptions::new()
             .read(true)
@@ -154,9 +185,17 @@ pub(crate) fn setup(preset: Preset, preserve_xdg_state: bool) -> Result<(), Stri
 }
 
 fn openai_oauth_configured(preserve_xdg_state: bool) -> Result<bool, String> {
+    oauth_configured(preserve_xdg_state, "openai")
+}
+
+fn anthropic_oauth_configured(preserve_xdg_state: bool) -> Result<bool, String> {
+    oauth_configured(preserve_xdg_state, "anthropic")
+}
+
+fn oauth_configured(preserve_xdg_state: bool, service: &str) -> Result<bool, String> {
     let output = process::output_checked(
-        sbx::command(preserve_xdg_state).args(["secret", "ls", "--service", "openai"]),
-        "checking OpenAI OAuth",
+        sbx::command(preserve_xdg_state).args(["secret", "ls", "--service", service]),
+        &format!("checking {service} OAuth"),
     )?;
     Ok(String::from_utf8_lossy(&output.stdout).contains("oauth configured"))
 }
@@ -234,12 +273,27 @@ pub(crate) fn preflight(action: &Action) -> Result<(), String> {
 
 pub(crate) fn doctor(context: &Context, preset: Preset, rocksdb: Option<&RocksDbHost>) -> bool {
     let mut healthy = true;
-    for tool in ["sbx", "code", "ssh", "git"] {
+    for tool in ["sbx", "code", "ssh", "git", "gh"] {
         if process::command_exists(tool) {
             println!("ok   {tool}");
         } else {
             println!("FAIL {tool} is missing");
             println!("{}", process::install_hint(tool));
+            healthy = false;
+        }
+    }
+
+    if process::command_exists("gh") {
+        let ok = Command::new("gh")
+            .args(["auth", "status", "--hostname", "github.com"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if ok {
+            println!("ok   host GitHub authentication for proxy-managed HTTPS/API access");
+        } else {
+            println!("FAIL GitHub CLI is not authenticated; run `gh auth login`");
             healthy = false;
         }
     }
@@ -295,24 +349,30 @@ pub(crate) fn doctor(context: &Context, preset: Preset, rocksdb: Option<&RocksDb
     }
 
     if process::command_exists("sbx") {
-        match sbx::require_minimum_version(context.preserve_xdg_state) {
-            Ok(version) => println!("ok   Docker Sandboxes {version} (minimum 0.39.0)"),
+        let sbx_version = match sbx::require_minimum_version(context.preserve_xdg_state) {
+            Ok(version) => {
+                println!("ok   Docker Sandboxes {version} (minimum 0.51.0 for Kits v3)");
+                Some(version)
+            }
             Err(error) => {
                 println!("FAIL {error}");
                 healthy = false;
+                None
             }
-        }
-        match sbx::diagnose_json(context.preserve_xdg_state) {
-            Ok(output) => match print_docker_diagnostics(&output.stdout) {
-                Ok(result) => healthy &= result,
+        };
+        if let Some(version) = sbx_version {
+            match sbx::diagnose_json(context.preserve_xdg_state, version) {
+                Ok(output) => match print_docker_diagnostics(&output.stdout) {
+                    Ok(result) => healthy &= result,
+                    Err(error) => {
+                        println!("FAIL {error}");
+                        healthy = false;
+                    }
+                },
                 Err(error) => {
                     println!("FAIL {error}");
                     healthy = false;
                 }
-            },
-            Err(error) => {
-                println!("FAIL {error}");
-                healthy = false;
             }
         }
         if preset.has_codex() {
@@ -328,6 +388,25 @@ pub(crate) fn doctor(context: &Context, preset: Preset, rocksdb: Option<&RocksDb
                 }
                 _ => {
                     println!("FAIL OpenAI OAuth is missing; run `sbxr setup`");
+                    healthy = false;
+                }
+            }
+        }
+        if preset.has_claude() {
+            match sbx::command(context.preserve_xdg_state)
+                .args(["secret", "ls", "--service", "anthropic"])
+                .output()
+            {
+                Ok(output)
+                    if output.status.success()
+                        && String::from_utf8_lossy(&output.stdout).contains("oauth configured") =>
+                {
+                    println!("ok   Docker host-managed Anthropic OAuth")
+                }
+                _ => {
+                    println!(
+                        "FAIL Anthropic OAuth is missing; create a sandbox, run `sbxr claude .`, and complete `/login` once"
+                    );
                     healthy = false;
                 }
             }

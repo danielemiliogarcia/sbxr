@@ -24,7 +24,7 @@ Code connection, and Rust workflow have all been exercised on that host.
 
 Every host needs:
 
-- Docker Sandboxes `sbx` 0.39.0 or newer, signed in with `sbx login`;
+- Docker Sandboxes `sbx` 0.51.0 or newer, signed in with `sbx login`;
 - Rust and Cargo 1.85 or newer to build and install `sbxr`;
 - native VS Code with its `code` launcher on `PATH`;
 - an OpenSSH client and the VS Code Remote-SSH extension;

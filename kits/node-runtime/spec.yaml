@@ -1,0 +1,55 @@
+# syntax=docker/sandbox-kit:3
+schemaVersion: "3"
+kind: mixin
+version: "22.23.4"
+displayName: Pinned Node.js runtime
+description: Adds the checksum-pinned Node.js 22 runtime used by sbxr's lockfile-pinned Pi, Paseo, and browser integrations.
+sourceUrl: https://nodejs.org/download/release/v22.23.4/
+
+capabilities:
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      install:
+        allow:
+          - nodejs.org:443
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        - command: |
+            set -euo pipefail
+            VERSION=22.23.4
+            case "$(uname -m)" in
+              x86_64|amd64)
+                ARCH=x64
+                SHA256=b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406
+                ;;
+              aarch64|arm64)
+                ARCH=arm64
+                SHA256=f7a1e486dbc8b286847815b477d4fb5e9fb963ed4489c3e1588853d685f589f9
+                ;;
+              *)
+                echo "unsupported sandbox architecture: $(uname -m)" >&2
+                exit 1
+                ;;
+            esac
+
+            PREFIX="/opt/node-v${VERSION}-linux-${ARCH}"
+            ARCHIVE="/tmp/node-v${VERSION}-linux-${ARCH}.tar.gz"
+            if [ ! -x "$PREFIX/bin/node" ]; then
+              URL="https://nodejs.org/download/release/v${VERSION}/node-v${VERSION}-linux-${ARCH}.tar.gz"
+              curl --proto '=https' --tlsv1.2 -fsSL -o "$ARCHIVE" "$URL"
+              echo "$SHA256  $ARCHIVE" | sha256sum -c -
+              rm -rf "$PREFIX"
+              mkdir -p "$PREFIX"
+              tar -xzf "$ARCHIVE" --strip-components=1 -C "$PREFIX"
+              rm -f "$ARCHIVE"
+            fi
+
+            for tool in node npm npx corepack; do
+              test -x "$PREFIX/bin/$tool"
+              ln -sfn "$PREFIX/bin/$tool" "/usr/local/bin/$tool"
+            done
+            node --version | grep -Fx "v${VERSION}"
+            npm --version
+          user: "0"
+          description: Install checksum-pinned Node.js 22.23.4 and bundled npm
