@@ -41,7 +41,9 @@ SBXR_PRESET=rust-claude sbxr --preset rust-codex new .
 
 `SBXR_NAME` bypasses project-specific name generation. Reusing one override
 across unrelated projects can unintentionally select the same sandbox, so it
-is primarily a debugging and automation option:
+is primarily a debugging and automation option. It must be 1–128 ASCII
+letters, digits, dots, dashes, or underscores, beginning with a letter or
+digit; path separators and traversal components are rejected:
 
 ```bash
 SBXR_NAME=rust-experiment sbxr up .
@@ -95,6 +97,8 @@ generated environment contains paths and kit references but no OAuth tokens,
 private keys, or literal secrets. GitHub/GHCR declarations may contain the
 fixed absolute host command `/usr/bin/gh auth token`; Docker executes it on the
 host and exposes only its proxy sentinel, never the command output, to guests.
+See [CREDENTIAL_ARCHITECTURE.md](CREDENTIAL_ARCHITECTURE.md) for the complete
+credential data flow and its limits.
 
 ## Protected project profiles and direct options
 
@@ -105,6 +109,7 @@ variables. They can appear before or after the command:
 sbxr --wizard .
 sbxr --memory 8g --cpus 4 --browser new -y .
 sbxr --isolated --network restricted up -y .
+sbxr --paseo-relay up -y .
 sbxr --config /trusted/team-profile.json up -y .
 ```
 
@@ -112,11 +117,25 @@ sbxr --config /trusted/team-profile.json up -y .
 the wizard save a validated version-1 JSON file below
 `$SBXR_STATE_ROOT/profiles`. Allowed settings are `workspace`, `network`,
 `githubProxy: true`, `integrations.browser`, `integrations.orca`,
-`integrations.ghcr`, and `resources.memory/cpus/rootDisk/dockerDisk`. Unknown
-keys, secret-looking keys, malformed types, unsafe sizes, excessive CPU/memory,
-and unsafe disk budgets are rejected. External `--config` files are parsed
-with the same schema and copied into protected state; profiles must never
-contain credentials.
+`integrations.ghcr`, `integrations.paseoRelay`, and
+`resources.memory/cpus/rootDisk/dockerDisk`. Unknown keys, secret-looking keys,
+malformed types, unsafe sizes, excessive CPU/memory, and unsafe disk budgets
+are rejected. External `--config` files are parsed with the same schema and
+copied into protected state; profiles must never contain credentials.
+
+`paseoRelay` defaults to `false`. When enabled, sbxr atomically enables Paseo's
+authenticated relay in sandbox-local configuration and adds the
+sandbox-scoped `relay.paseo.sh:443` endpoint; it does not place relay
+credentials in the profile. Disabling it removes that endpoint rule. It is
+rejected with the `offline` network mode. Unlike creation-time VM resources,
+toggling it does not require sandbox recreation; `sbxr repair` or the next
+ensuring command reconciles it.
+
+`network` is also runtime-reconciled and does not change the environment
+contract. Switching among `development`, `restricted`, and `offline` adds the
+new sandbox-scoped deny rules before removing the prior sbxr-owned rules. Rule
+ownership is recorded as exact Docker rule IDs in protected host metadata;
+manual and host-global rules are never claimed or removed.
 
 `--root-disk` and `--docker-disk` are passed to Docker Sandboxes only for the
 environment lifecycle command. Memory and CPU limits are declared in the

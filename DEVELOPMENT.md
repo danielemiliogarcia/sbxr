@@ -74,13 +74,14 @@ The binary is deliberately split by responsibility:
 | `cli.rs` | Argument parsing, presets, actions, and help text |
 | `profile.rs` | Validated protected project profiles, wizard, and host resource checks |
 | `diagnostics.rs` | Redacted structured lifecycle reports |
+| `health.rs` | Protected resumable integration-health state |
 | `environment.rs` | Project identity, deterministic names, data/state paths, and RocksDB validation |
 | `envfile.rs` | Protected `.sbxenv.yaml` generation, atomic state files, and environment-contract guards |
-| `sbx.rs` | The only Docker Sandboxes CLI construction/version/schema boundary |
+| `sbx.rs` | The only Docker Sandboxes CLI construction/version/schema/capability boundary |
 | `git.rs` | Sandbox Git tooling, identity/signing-policy mirroring, GitHub access, and migration |
 | `sandbox.rs` | Declarative development/review orchestration, remote commands, and Cargo audits |
 | `host.rs` | Setup, action-specific preflight, and `doctor` diagnostics |
-| `auth.rs` | Disabled legacy import guidance, subscription status, and proxy-route verification |
+| `auth.rs` | Disabled legacy import guidance, subscription status, renewal, and proxy-route verification |
 | `sign.rs` | Host-only OpenPGP commit signing without project hook execution |
 | `verify.rs` | Existing-sandbox runtime, credential, tool, and SSH-agent audit |
 | `node_tools.rs` | Embedded lockfile delivery, exact Node-tool installation, and hash-checked reuse |
@@ -278,6 +279,20 @@ present, and that a manually created same-name sandbox is rejected before
 `sbx env run`. Explicit `rm` must remove only the sandbox and its trusted
 per-sandbox host state; the host project must remain.
 
+Compatibility changes must update the committed `sbx version`, `sbx list`, and
+`sbx ports` fixtures under `tests/fixtures`. Keep parsers strict for required
+security fields and tolerant of unrelated future fields. Test old/missing
+client and server versions, absent command capabilities, missing arrays,
+malformed port mappings, and non-loopback publications. Do not paper over a
+Docker schema change with unstructured text parsing.
+
+Credential-audit changes require failure tests for unexpected managed fields,
+malformed JSON, symlinked paths, unsafe owners/types/permissions, custom
+credential homes, and reusable values. Assertions and diagnostics may name a
+store but must never include a credential value. A live verification test must
+use `verify --live` explicitly; normal `verify`, `repair`, `status`, and
+`new -y` must not consume model usage.
+
 Check relevant tools and compile without writing `target/` into the mounted
 host project:
 
@@ -301,6 +316,17 @@ cargo run --frozen -- --preset rust-codex up /path/to/test-rust-project
 cargo run --frozen -- --preset rust-claude up /path/to/test-rust-project
 ```
 
+For project-toolchain changes, use independent nested crates with explicit
+workspace roots and different stable/nightly `rust-toolchain.toml` files.
+After a successful reconciliation, uninstall one selected toolchain, rerun
+`sbxr up`, and confirm it is repaired despite the unchanged manifest marker.
+`sbxr verify` must report both the pinned base tools and every project manifest
+ready; project overrides must not affect the base-version result.
+
+For VS Code mirroring changes, test a disposable sandbox with a large host
+extension inventory. Confirm installation is split into bounded batches, the
+remote inventory verifies afterward, and the sandbox remains responsive.
+
 Stop test sandboxes afterward while preserving their state:
 
 ```bash
@@ -308,11 +334,16 @@ cargo run --frozen -- stop /path/to/test-rust-project
 ```
 
 For Orca changes, run `sbxr orca -y` twice against an Orca-enabled disposable
-sandbox. The first run must install or repair `xauth`, emit a private pairing
-URL, leave the unprivileged server process running, and listen only on guest
-loopback port 6768. The second run must reuse the verified AppImage and skip
-package installation. Never paste a captured pairing URL into logs or test
-artifacts.
+sandbox. The first run must install or repair `xauth` and the AppImage runtime
+libraries, emit a private pairing URL, leave the
+unprivileged server process running, and listen only on guest
+loopback port 6768. Confirm Docker allocated the host port dynamically and
+published it only on `127.0.0.1`; a non-loopback structured fixture must fail.
+The second run must reuse the verified AppImage and skip package installation.
+When the sandbox is recreated with its Orca data volume retained, confirm the
+guarded stale-lock path recovers the previous microVM's lock and a lock
+matching a live PID and process start time is never removed.
+Never paste a captured pairing URL into logs or test artifacts.
 
 Use `rm` only when intentionally discarding the sandbox-local state. It does
 not delete the mounted host project, but sandbox packages, agent history, and
@@ -354,6 +385,10 @@ currently best-effort as described in `PLATFORM_SUPPORT.md`. Cancel an
 unsaved-file prompt once and confirm the stop is aborted without powering off
 the sandbox. On Linux/X11, exercise this with `wmctrl` installed and with
 another unrelated VS Code window open.
+Also recreate a disposable sandbox under the same deterministic name with
+`sbxr rm` followed by `sbxr new`. The matching remote window must close before
+removal, the close path must return without a lingering `code --status`
+process, and the recreated VM must establish a fresh Remote-SSH connection.
 
 ## Before handing off a change
 

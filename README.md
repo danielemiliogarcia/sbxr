@@ -39,8 +39,9 @@ directory above; an empty directory is initialized with Cargo automatically.
   Docker Desktop and Docker Engine are not required just to use `sbx`.
 - Rust and Cargo 1.85 or newer to build and install `sbxr` from source.
 - Native VS Code with the `code` command on `PATH`, plus an OpenSSH client.
-- On Linux/X11, `wmctrl` is recommended so `sbxr stop` can gracefully close
-  only the matching Remote-SSH window (`sudo apt-get install wmctrl` on Ubuntu).
+- On Linux/X11, `wmctrl` is recommended so `sbxr stop` and `sbxr rm` can
+  gracefully close only the matching Remote-SSH window (`sudo apt-get install
+  wmctrl` on Ubuntu).
 - Git is recommended and is required for `sbxr review`.
 - For GitHub SSH push and sandbox commit signing, load a key in the host SSH
   agent (`ssh-add -L` must list it). The private key stays on the host.
@@ -51,6 +52,11 @@ directory above; an empty directory is initialized with Cargo automatically.
 `sbxr setup` configures Docker sign-in, agent OAuth, and VS Code Remote-SSH
 when needed. It reports missing host software with installation guidance, but
 does not install system packages or invoke `sudo`.
+
+Before lifecycle operations, sbxr parses Docker's client, server, state, and
+API versions and probes the exact CLI capabilities it relies on. It rejects an
+old client, an old or unavailable server, or a partially compatible command
+surface with an actionable upgrade error instead of guessing across releases.
 
 To build `sbxr` or contribute a feature, see the
 [development guide](DEVELOPMENT.md).
@@ -75,8 +81,8 @@ The default `rust-multi-agent` preset combines:
   during the first sandbox bootstrap;
 - GitHub HTTPS/API access through Docker's host credential proxy, with only a
   non-reusable sentinel in the guest; forwarded GitHub SSH remains available;
-- protected per-project profiles, redacted diagnostic reports, and staged
-  bootstrap checkpoints;
+- protected per-project profiles, redacted diagnostic reports, staged
+  bootstrap checkpoints, and a resumable per-integration health ledger;
 - VS Code Remote-SSH, including version-matched host extension installation;
 - GitHub SSH push/pull and host-policy-matched SSH commit signing through
   Docker's forwarded host SSH agent;
@@ -117,18 +123,22 @@ orchestration.
 | `sbxr profile .` | Print the protected nonsecret profile |
 | `sbxr auth-import .` | Explain why legacy credential imports are disabled |
 | `sbxr auth-status .` | Check Codex, Claude, and Pi provider status |
+| `sbxr auth renew openai\|anthropic\|github .` | Renew one host-proxied credential, then audit and verify it |
 | `sbxr audit .` | Run cargo-audit, cargo-deny, and cargo-vet if configured |
 | `sbxr verify .` | Audit runtime identity, guest credentials, tools, and SSH forwarding |
+| `sbxr verify --live .` | Also make one minimal request through each selected model provider |
+| `sbxr repair .` | Reconcile missing/outdated integrations and verify the result |
+| `sbxr diagnose .` | Summarize the newest redacted report across all projects and selected project health |
 | `sbxr commit-pgp-sign .` | OpenPGP-sign the current commit on the host |
 | `sbxr commit-pgp-sign --all-mine .` | Sign your unsigned commits ahead of the upstream |
 | `sbxr commit-pgp-sign --range BASE..HEAD .` | Sign your unsigned commits in an explicit range |
 | `sbxr review .` | No-OAuth, clone-mode review sandbox |
 | `sbxr inspect .` | Show the protected environment declaration and contract state |
 | `sbxr name .` | Print the deterministic name |
-| `sbxr status .` | Report whether the project sandbox exists and its state |
+| `sbxr status .` | Report sandbox state and the persisted integration-health summary |
 | `sbxr stop .` | Stop while preserving state |
 | `sbxr rm .` | Remove sandbox-local state; host files remain |
-| `sbxr rm --force .` | Remove even while VS Code/SSH is connected |
+| `sbxr rm --force .` | Pass Docker's force flag while removing sandbox-local state |
 | `sbxr setup` | Configure missing Docker login, provider OAuth, and Remote-SSH |
 | `sbxr doctor [PATH]` | Diagnose the host; with a project compare host/guest versions |
 | `sbxr --version` | Print the installed sbxr version |
@@ -143,22 +153,27 @@ copy credentials or perform a missing OAuth login.
 Normal launch keeps the opinionated defaults: shared host workspace, the
 multi-agent Rust environment, development networking, host-proxied GitHub,
 forwarded SSH, and the existing editor/shell integrations. Browser, Orca,
-GHCR, isolated mode, and tighter network profiles are opt-in. Run `sbxr wizard
-.` only when you want to choose them interactively, or use direct flags:
+GHCR, the Paseo relay, isolated mode, and tighter network profiles are opt-in.
+Run `sbxr wizard .` only when you want to choose them interactively, or use
+direct flags:
 
 ```bash
 sbxr --browser --memory 8g --cpus 4 new -y .
 sbxr --network restricted up -y .
 sbxr --ghcr up -y .
+sbxr --paseo-relay up -y .
 ```
 
 Selections are validated and saved as nonsecret JSON under the protected sbxr
-state directory. They become part of the environment contract; changing a
-creation-time selection requires the explicit `sbxr rm`/`new` sequence printed
-by sbxr. `development` retains ordinary kit and project egress. `restricted`
-blocks package/toolchain download hosts after bootstrap, and `offline` blocks
-all sandbox egress after bootstrap. Both policies are scoped to that sandbox;
-sbxr never resets host-global policy.
+state directory. Workspace, integration, and VM-resource selections become
+part of the creation-time environment contract; changing one requires the
+explicit `sbxr rm`/`new` sequence printed by sbxr. Network policy and the Paseo
+relay are runtime-reconciled and do not require VM recreation. `development`
+retains ordinary kit and project egress. `restricted` blocks package/toolchain
+download hosts after bootstrap, and `offline` blocks all sandbox egress after
+bootstrap. sbxr records only the rule IDs it created in protected host state,
+removes only those IDs when the profile changes, and never resets user-created
+or host-global policy.
 
 ## Git inside or outside the sandbox
 
@@ -259,21 +274,40 @@ agent, selected kits, empty runtime-mount list, and workspace; audits known
 Codex, Claude, Pi, GitHub, Docker, and VS Code credential stores for reusable
 values; performs a real, non-generation Anthropic API request through the
 sentinel proxy; verifies pinned tool versions; and checks the forwarded SSH
-agent without printing public keys. It never scans project files or deletes
-findings.
+agent without printing public keys. The audit accepts only the exact managed
+credential schemas, checks supported custom credential homes, rejects unsafe
+owners, permissions, symlinks, and malformed stores, and never scans project
+files or deletes findings. Normal reconciliation validates the managed store
+paths and enforces `0600` on the Codex, Claude, and Pi sentinel files before
+verification. `sbxr verify --live` additionally makes minimal
+Codex, Claude, and Pi model requests, suppresses provider output, and repeats
+the credential audit afterward. It is opt-in because it consumes a small
+amount of subscription usage.
+
+Every verification stage is recorded in a protected host-side integration
+health ledger as `pending`, `verified`, `skipped`, or `needs attention`.
+`sbxr status` shows it without changing the sandbox. `sbxr repair` safely
+reruns idempotent reconciliation for missing or outdated integrations and then
+verifies the result; it does not make live model requests.
+Removing a sandbox also removes its health ledger so a later recreation cannot
+inherit stale verification results; the nonsecret project profile is retained.
 
 Lifecycle commands write a redacted JSON report under
 `$SBXR_STATE_ROOT/diagnostics`. Reports contain stage/status categories only:
 no arguments, project paths, environment, raw errors, command output, pairing
-links, or credential values.
+links, or credential values. `sbxr diagnose .` labels and summarizes the newest
+report across all projects, then displays the selected project's health ledger.
 
-When the matching Remote-SSH window is open, `sbxr stop` asks that exact VS
-Code window to close normally and waits before stopping the microVM. This gives
+When the matching Remote-SSH window is open, `sbxr stop` and `sbxr rm` ask that
+exact VS Code window to close normally and wait before stopping or removing the
+microVM. This gives
 VS Code time to serialize terminal tabs, process metadata, command history, and
 scrollback; other VS Code windows are left alone. An unsaved-file prompt must
 be resolved before stopping proceeds. Linux/X11 uses `wmctrl` to address the
 exact window; if safe targeted closing is unavailable, `sbxr` leaves the
-sandbox running and asks for a manual close. On the next `sbxr new`, VS Code
+sandbox in place and asks for a manual close. This also prevents a later
+recreation with the same sandbox name from reusing a stale Remote-SSH window.
+On the next `sbxr new`, VS Code
 uses its process-revive support to recreate terminal shells from the saved
 session metadata, with up to 10,000 lines requested for persistent scrollback.
 Long-running processes cannot continue while the microVM is powered off.
@@ -312,6 +346,14 @@ transport does not install or start a remote daemon; `sbxr paseo` is what starts
 it. Agents Paseo launches there are the sandbox's own Claude, Codex, and Pi
 installations, with the sandbox's network policy and file access.
 
+For authenticated access when direct SSH is unavailable, opt in with
+`--paseo-relay` or the wizard. sbxr updates Paseo's sandbox-local configuration
+atomically, restarts an already-running daemon only when that setting changed,
+and allows only `relay.paseo.sh:443` for that sandbox. Disabling it removes that
+scoped rule. The fast default remains relay-off and the SSH URL remains usable
+when the relay is enabled. Relay mode is incompatible with the `offline`
+network profile.
+
 ## Optional browser and Orca integrations
 
 `--browser` installs the committed `@playwright/mcp` 0.0.83 lock and its exact
@@ -324,16 +366,43 @@ registered as `sbxr-browser` after trusted Codex configuration mirroring.
 `sbxr orca .` enables the optional Orca kit in the protected project profile,
 installs the checksum-pinned Orca 1.4.247 AppImage by extracting it without
 FUSE, installs its guest-only headless prerequisites including Xvfb and
-`xauth`, starts `orca serve` as the unprivileged sandbox user, and prints its
-pairing URL. Re-running the command repairs missing prerequisites without
+`xauth` plus Electron's NSPR runtime, starts `orca serve` as the unprivileged
+sandbox user, and prints its pairing URL. Re-running the command repairs missing prerequisites without
 downloading an already verified AppImage again. The server is published only
-to a deterministic host loopback port, and sbxr rewrites the endpoint embedded
-in the pairing payload to that published port. Paste the URL into Orca Desktop
+to a Docker-allocated ephemeral host loopback port. sbxr discovers the actual
+mapping, fails closed if it is not loopback-only, and rewrites the endpoint
+embedded in the pairing payload to that port. Paste the URL into Orca Desktop
 under **Settings → Remote Orca Servers → Add Server**. Treat the pairing URL as
 a secret and do not publish the loopback port through a public tunnel.
 
+Orca's data volume survives a sandbox recreation. If its lock belongs to the
+previous microVM, sbxr first asks Orca to perform its guarded stale-lock
+recovery. For the expected changed-machine-identity refusal, sbxr clears only
+the sandbox-local `orcad.lock` after validating its type, owner, permissions,
+PID, and Linux process start time. A lock matching a live process, or any other
+recovery refusal, remains untouched and `sbxr orca` fails closed.
+
 Both integrations are disabled by default and become creation-time contract
 inputs when enabled.
+
+### Upgrade note for existing sandboxes
+
+The Unreleased environment contract replaces Orca's fixed host port with a
+Docker-allocated loopback port and explicitly disables shared host skills in
+review sandboxes. An Orca-enabled or review sandbox created by an older sbxr
+must therefore be removed and recreated when sbxr reports contract drift. Run
+`sbxr rm PATH`, then `sbxr new -y PATH` (or rerun `sbxr review PATH`) as
+appropriate. Shared-workspace source files remain on the host.
+
+This release also moves network choice out of the creation-time fingerprint,
+which causes a one-time contract migration for existing development sandboxes.
+After recreating once, later switches among `development`, `restricted`, and
+`offline` are applied in place.
+
+With Docker Sandboxes 0.51, the Orca loopback host port changes across a normal
+`sbxr stop`/start as well as recreation. Rerun `sbxr orca PATH` after a restart
+and replace the old Orca Desktop remote-server entry with the newly printed
+pairing URL.
 
 ## Why `sbxr`? From project folder to agent-ready Rust IDE
 
@@ -364,7 +433,8 @@ That ready-to-code experience includes:
   supply-chain tools such as `cargo-audit`, `cargo-deny`, and `cargo-vet`;
 - automatic installation/selection of requested `rust-toolchain.toml` or
   `rust-toolchain` toolchains and components, including nested repositories in
-  a multi-project workspace;
+  a multi-project workspace; reconciliation rechecks that every selected
+  compiler remains runnable before trusting its cached marker;
 - a local-like Rust editing experience in VS Code: remote Rust Analyzer powers
   completion, diagnostics, hover information, find references, go to
   definition, and source navigation across the project and available imported
@@ -560,7 +630,10 @@ that launched session. The sandbox is already the execution boundary and the
 development agents intentionally have full permissions inside it, so the
 additional “Trust this folder” prompt would only block expected tooling.
 `sbxr review` does not disable Workspace Trust because it is intended for
-opening unfamiliar code with additional safeguards.
+opening unfamiliar code with additional safeguards. It also tells Docker not
+to mount shared host agent skills, in addition to using a mountless clone,
+omitting agent OAuth and GitHub SSH, and skipping host configuration and
+extension mirroring.
 
 ## Optional host RocksDB acceleration
 
@@ -595,6 +668,10 @@ that Docker replaces only on requests to the approved hosts. The legacy
 `sbxr auth-import` command is intentionally disabled so it cannot bypass this
 boundary.
 
+For the complete service-by-service data flow, SSH-agent distinction,
+unsupported-secret limits, and verification procedure, see
+[Credential architecture](CREDENTIAL_ARCHITECTURE.md).
+
 Pi recognizes both proxy sentinels. `pi --provider openai-codex` uses the same
 ChatGPT subscription and `pi --provider anthropic` uses the same host-managed
 Claude login without receiving either real token. Docker owns refresh and
@@ -613,7 +690,15 @@ lockfile is deliberately not reused because it targets the host's Pi release.
 The mirror excludes authentication files, histories, sessions, logs, project
 trust records, runtime state, and Codex system-managed skills. Host paths in
 copied text are rewritten to `/home/agent`, while Docker-managed provider and
-safety settings win during merges.
+safety settings win during merges. Credential-shaped fields are removed from
+mirrored Claude settings, and literal API keys or credential headers are
+removed from Pi model configuration; strict environment-variable references
+remain available without copying their values.
+
+Remote VS Code extensions are installed in bounded batches rather than one
+unbounded CLI invocation. This releases installer state between batches and
+avoids large host extension inventories exhausting the sandbox or host while
+preserving exact version mirroring and the existing individual retry pass.
 
 Before merging Claude settings, `sbxr` checks simple host hook commands against
 the sandbox. The recognized `rtk hook claude` integration is mirrored from the
@@ -675,16 +760,18 @@ mirror them from a trusted host profile.
 - `src/cli.rs`: argument parsing, presets, actions, and help text;
 - `src/profile.rs`: protected profiles, resource validation, and wizard;
 - `src/diagnostics.rs`: redacted structured reports;
+- `src/health.rs`: protected resumable integration-health records;
 - `src/environment.rs`: runtime context, project identity, sandbox names, and
   optional host RocksDB validation;
 - `src/envfile.rs`: protected declarative environments and desired/applied
   contract state;
-- `src/sbx.rs`: the centralized Docker Sandboxes CLI boundary;
+- `src/sbx.rs`: the centralized Docker Sandboxes CLI boundary, strict runtime
+  schema parsing, capability probes, and loopback-port discovery;
 - `src/sandbox.rs`: development/review orchestration, remote commands, and
   Cargo audits on top of declarative lifecycle;
 - `src/host.rs`: setup, preflight checks, and diagnostics;
-- `src/auth.rs`: disabled legacy credential import, subscription status, and
-  proxy-route verification;
+- `src/auth.rs`: disabled legacy credential import, subscription status,
+  supported renewal flows, and proxy-route verification;
 - `src/sign.rs`: host-only OpenPGP commit signing;
 - `src/verify.rs`: redacted runtime and guest-credential verification;
 - `src/node_tools.rs`: embedded lockfile upload, exact Node-tool installation,
@@ -717,8 +804,9 @@ validation status, see [PLATFORM_SUPPORT.md](PLATFORM_SUPPORT.md).
 ## Limitations
 
 Docker's `.sbxenv.yaml`/`sbx env` and Kits v3 interfaces remain evolving in
-Docker Sandboxes 0.51. `sbxr` centralizes those dependencies, but a future Docker release
-may require a compatibility update.
+Docker Sandboxes 0.51. sbxr centralizes those dependencies, validates both
+runtime sides and required capabilities, and keeps structured compatibility
+fixtures, but a future Docker release can still require a compatibility update.
 
 After a microVM stop, VS Code Remote-SSH may restore terminal tabs but lose their scrollback due to a VS Code limitation/bug; [details and tested versions](PLATFORM_SUPPORT.md#vscode-state-across-a-microvm-stop).
 

@@ -3,6 +3,10 @@
 `sbxr` reduces the blast radius of Rust builds and coding agents; it does
 not certify dependencies, extensions, or agent output as safe.
 
+The host proxy, guest sentinels, SSH-agent forwarding, OpenPGP signing, and
+unsupported-secret boundaries are described in
+[CREDENTIAL_ARCHITECTURE.md](CREDENTIAL_ARCHITECTURE.md).
+
 ## Mitigations
 
 - Builds, build scripts, procedural macros, tests, binaries, and agents run in
@@ -10,9 +14,12 @@ not certify dependencies, extensions, or agent output as safe.
 - Projects receive separate persistent Cargo caches.
 - Kit-declared endpoints describe required provisioning/runtime destinations.
   Optional `restricted` and `offline` profiles add sandbox-scoped deny rules
-  after bootstrap without modifying host-global policy.
+  after bootstrap without modifying host-global policy. Exact sbxr-owned rule
+  IDs are tracked in protected host state, not a guest-controlled marker, and
+  profile transitions remove only those IDs.
 - Review mode mounts a clone rather than a writable host checkout, provides no
-  agent OAuth, and does not mirror the host VS Code extension set.
+  agent OAuth or GitHub SSH, does not mirror host agent/VS Code configuration,
+  and explicitly disables Docker's shared host skills mount.
 - Authoritative `.sbxenv.yaml` files live in protected host state outside every
   mounted workspace. On Unix their directories/files use `0700`/`0600`, writes
   are atomic, and symlinked authoritative path components/files are rejected.
@@ -22,6 +29,9 @@ not certify dependencies, extensions, or agent output as safe.
   environment and every regular file in each selected embedded kit, including
   Node package manifests and lockfiles; links and non-regular kit files are
   rejected.
+- Protected profiles and explicit `SBXR_NAME` overrides reject unsafe file
+  types, permissions, symlinks, and path-like sandbox names before they can
+  influence authoritative state paths.
 - Toolchains and agents are pinned; available bootstrap artifacts are checksum
   verified. Codex, Claude, and Shell use official Kits v3 pinned by OCI digest.
   Node.js uses architecture-specific 22.23.4 archives with committed SHA-256
@@ -38,19 +48,40 @@ not certify dependencies, extensions, or agent output as safe.
   only host-scoped sentinels or proxy-injected requests.
   Each sbxr launch reasserts Pi's managed provider entries, so guest login
   state cannot persistently replace those sentinels with reusable OAuth values.
+  Reconciliation also validates the known managed store paths and normalizes
+  the Codex, Claude, and Pi sentinel files to guest-private `0600` mode.
+- The guest audit accepts only exact managed Codex/Pi schemas, includes
+  supported custom credential homes, and fails closed on malformed JSON,
+  symlinks, unsafe ownership/types, and overly broad permissions. It reports
+  store locations but never credential values.
 - GitHub authentication and enabled or explicitly requested SSH signing use
   Docker's forwarded host SSH agent; private SSH keys are not copied into the
   VM. Automatic commit/tag signing follows the host project's effective Git
   defaults only when its signing format is SSH.
 - Safe config mirroring excludes credential, history, session, log, project
-  trust, and runtime-state files.
+  trust, and runtime-state files. Claude settings additionally drop
+  credential-shaped fields; Pi model configuration drops literal API-key and
+  credential-header fields while retaining strict environment-variable
+  references.
 - Validated project profiles are nonsecret, reject unknown and secret-looking
   fields, and use protected atomic host files. Structured diagnostic reports
   exclude arguments, paths, environment, raw errors, output, and secret links.
+- Per-integration health uses the same protected host-state discipline and
+  records only constrained status/detail fields. A new sbxr version invalidates
+  earlier verified stages until they are checked again.
 - The optional browser MCP is lockfile-pinned, installs with npm lifecycle
   scripts disabled, uses an ephemeral profile and sandbox proxy CA, and shares
   no host browser state. Orca is checksum-pinned, runs headlessly with
-  guest-installed Xvfb/`xauth`, and binds through host loopback only.
+  guest-installed Xvfb/`xauth` and runtime libraries, and binds through host
+  loopback only.
+- sbxr validates both Docker client and server versions, parses required
+  structured schemas, and probes the exact CLI flags it depends on before
+  changing sandbox state. Orca host ports are allocated dynamically and a
+  non-loopback mapping is rejected.
+- Orca stale-lock recovery is scoped to its sandbox-local persistent volume.
+  sbxr accepts only Orca's changed-machine-identity refusal, validates the
+  lock's owner, mode, type, PID, and Linux start time, and refuses to remove a
+  lock matching a live process.
 
 ## Limits
 
@@ -114,6 +145,11 @@ not certify dependencies, extensions, or agent output as safe.
 - The sandbox Paseo daemon binds to the sandbox loopback interface with its
   external relay disabled, so reaching it requires an SSH session into that
   sandbox. Anyone who can open that session can drive the agents it controls.
+- Enabling the optional Paseo relay expands reachability to an authenticated
+  third-party relay and permits its endpoint for that sandbox. It remains off
+  by default, removes the scoped endpoint rule when disabled, cannot be
+  combined with `offline`, and does not make agent actions less privileged
+  inside the sandbox.
 - `--rocksdb-host` trusts the selected host-built shared library and its ABI.
   The prefix is read-only, but a compromised or incompatible library still
   executes inside the sandbox process and can affect the mounted project.
@@ -152,7 +188,9 @@ not certify dependencies, extensions, or agent output as safe.
    the sandbox.
 9. Inspect blocked egress with `sbx policy log "$(sbxr name)"`.
 10. Run `sbxr verify` to check managed credential stores and runtime identity
-    without printing credential values.
+    without printing credential values. Use `sbxr verify --live` deliberately
+    when a real minimal provider request is needed, and `sbxr repair` for a
+    health stage marked pending or needing attention.
 11. Remove a suspected sandbox with `sbxr rm` rather than reusing its
     caches. Sandbox-local deletion is irreversible; host project files remain.
 

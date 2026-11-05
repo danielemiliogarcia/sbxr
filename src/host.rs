@@ -349,10 +349,34 @@ pub(crate) fn doctor(context: &Context, preset: Preset, rocksdb: Option<&RocksDb
     }
 
     if process::command_exists("sbx") {
-        let sbx_version = match sbx::require_minimum_version(context.preserve_xdg_state) {
-            Ok(version) => {
-                println!("ok   Docker Sandboxes {version} (minimum 0.51.0 for Kits v3)");
-                Some(version)
+        let sbx_version = match sbx::runtime_info(context.preserve_xdg_state) {
+            Ok(info) if sbx::validate_minimum_versions(&info).is_ok() => {
+                println!(
+                    "ok   Docker Sandboxes client {} · server {} · API {} (minimum 0.51.0 for Kits v3)",
+                    info.client, info.server, info.api_version
+                );
+                if info.server_state != "running" {
+                    println!(
+                        "WARN Docker Sandboxes server is {}; start it with `sbx daemon start --detach` before creating or using a sandbox",
+                        info.server_state
+                    );
+                    None
+                } else {
+                    match sbx::require_minimum_version(context.preserve_xdg_state) {
+                        Ok(version) => Some(version),
+                        Err(error) => {
+                            println!("FAIL {error}");
+                            healthy = false;
+                            None
+                        }
+                    }
+                }
+            }
+            Ok(info) => {
+                let error = sbx::validate_minimum_versions(&info).unwrap_err();
+                println!("FAIL {error}");
+                healthy = false;
+                None
             }
             Err(error) => {
                 println!("FAIL {error}");

@@ -2,6 +2,121 @@
 
 ## Unreleased
 
+### Added
+
+- Added a protected, resumable integration-health ledger. `sbxr status` shows
+  pending, verified, skipped, and needs-attention stages; `sbxr repair`
+  idempotently reconciles integrations and verifies the result.
+- Added `sbxr diagnose` to summarize the newest privacy-preserving lifecycle
+  report together with project health, and enriched reports with sanitized
+  runtime client/server/API metadata and failure categories.
+- Added `sbxr auth renew openai|anthropic|github` using each integration's
+  supported host-proxy workflow, with credential audits before and after the
+  renewal and a verification pass before reuse.
+- Added opt-in `sbxr verify --live` model requests for Codex, Claude, and Pi.
+  Raw provider output is suppressed and the guest credential audit is repeated
+  after the requests.
+- Added an optional authenticated Paseo relay profile setting and wizard
+  choice. The default remains relay-off; enabling it atomically updates guest
+  configuration and adds only the sandbox-scoped relay endpoint.
+
+### Changed
+
+- Docker compatibility is now an explicit client/server boundary: sbxr parses
+  the required `sbx version --json` fields and probes every CLI capability it
+  relies on before lifecycle work. Committed 0.51 fixtures guard the schemas.
+- Orca now uses a Docker-allocated ephemeral host port, discovers the actual
+  mapping from structured output, and accepts it only when bound to loopback.
+- `sbxr review` explicitly disables Docker's shared host skills mount in
+  addition to its existing clone-mode, no-OAuth, no-SSH, no-host-mirror rules.
+- The normal `sbxr new -y` path, comfortable defaults, shared workspace, and
+  SSH-agent forwarding remain unchanged.
+
+### Upgrade notes
+
+- Existing Orca-enabled sandboxes must be recreated because their environment
+  contract now requests a Docker-allocated loopback port instead of a fixed
+  host port. Existing review sandboxes must also be recreated because the
+  contract now explicitly disables shared host skills. Docker Sandboxes 0.51
+  reallocates the ephemeral port across a normal stop/start too, so rerun
+  `sbxr orca` after a restart or recreation and update the Orca Desktop pairing
+  entry.
+- Existing development sandboxes also require a one-time recreation because
+  the profile fingerprint now correctly excludes runtime network policy. After
+  that migration, changing `development`, `restricted`, or `offline` no longer
+  recreates the VM.
+
+### Security
+
+- Strengthened the guest credential audit to require exact Codex and Pi
+  sentinel schemas, inspect supported custom credential homes, fail closed on
+  malformed JSON, and reject credential stores with unsafe types, owners,
+  permissions, or symlinks. Findings contain locations only, never values.
+- Health records and their details use protected atomic host state and a
+  constrained redacted schema. Live provider verification is never implicit.
+- Added a consolidated credential-architecture guide covering Docker's host
+  proxy, guest sentinels, GitHub/GHCR host commands, SSH-agent forwarding,
+  host-only OpenPGP signing, workspace modes, unsupported secrets, renewal,
+  auditing, and verification commands.
+- Network-profile rule ownership now lives in protected host metadata as exact
+  Docker rule IDs. Guest code cannot forge an ownership marker, and sbxr never
+  removes a manual or host-global policy rule while changing profiles.
+- The credential audit now rejects malformed Docker auth entries, guest Docker
+  credential helpers, and qualified plural fields such as `authTokens` and
+  `clientSecrets`. Protected profile reads reject unsafe files and sandbox-name
+  overrides cannot traverse outside authoritative state.
+
+### Fixed
+
+- Reconciliation now validates the known proxy-managed credential paths and
+  enforces guest-private `0600` mode on Codex, Claude, and Pi sentinel files.
+  This fixes the broader mode initially assigned to Codex and Claude stores by
+  the upstream workload while keeping the audit fail-closed.
+- Orca repair now detects and installs the NSPR runtime required by its
+  Electron AppImage on hardened Kits v3 images, while reusing the existing
+  checksum-verified extraction.
+- Orca startup now safely recovers the stale daemon lock retained when its
+  sandbox-local data volume survives a microVM recreation. Recovery is limited
+  to Orca's explicit changed-machine-identity case and refuses a lock matching
+  a live local process.
+- Claude settings mirroring now removes credential-shaped fields. Pi
+  `models.json` mirroring removes literal API keys and credential-like headers
+  while retaining explicit environment-variable references. The guest audit no
+  longer mistakes numeric `maxTokens` model metadata for a token.
+- Rust verification now checks the pinned sbxr toolchain explicitly through
+  `rustup run`, so a legitimate project-root override is not reported as base
+  toolchain drift. It also validates every discovered project toolchain, and
+  reconciliation repairs a removed toolchain even when its cached manifest
+  marker still matches.
+- Remote VS Code extensions are installed in bounded batches, preventing a
+  large host inventory from accumulating installer memory in one process and
+  exhausting the sandbox VM.
+- `sbxr rm` now closes the matching Remote-SSH window before removing the VM,
+  preventing a recreated sandbox with the same name from inheriting a stale
+  canceled connection. Window-close polling is bounded and avoids a VS Code
+  status race after the last desktop window exits.
+- Network profiles are now genuinely runtime-reconfigurable without sandbox
+  recreation. Transitions add the new deny policy before removing prior
+  sbxr-owned rules, persist interrupted transitions safely, and support
+  Docker's one-rule-per-resource expansion.
+- Runtime verification now rejects unexpected extra kits, accounts for the
+  optional RocksDB kit, and verifies the selected network profile. Orca accepts
+  only TCP loopback port mappings and pairing payloads whose endpoint authority
+  is the expected guest loopback listener.
+
+### Testing
+
+- Added failure-path tests for runtime schema drift, missing command
+  capabilities, executable credential-audit fixtures, review isolation,
+  protected health-ledger transitions, relay-profile validation, non-loopback
+  Orca mappings, and the guarded Orca stale-lock script contract. Added
+  multi-toolchain verification and bounded extension-batch regression
+  coverage, plus a bounded-process regression for the VS Code status probe.
+- Added behavioral regressions for Docker auth parsing and credential helpers,
+  plural credential fields, exact kit inventories, sandbox-name traversal,
+  runtime network contracts, split network rules, TCP-only published ports,
+  and Orca endpoint validation.
+
 ## [0.3.1] - 2026-11-04
 
 ### Changed

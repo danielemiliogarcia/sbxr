@@ -79,6 +79,7 @@ pub(crate) struct Profile {
     pub(crate) browser: bool,
     pub(crate) orca: bool,
     pub(crate) ghcr: bool,
+    pub(crate) paseo_relay: bool,
     pub(crate) github_proxy: bool,
     pub(crate) resources: Resources,
 }
@@ -91,6 +92,7 @@ impl Default for Profile {
             browser: false,
             orca: false,
             ghcr: false,
+            paseo_relay: false,
             github_proxy: true,
             resources: Resources::default(),
         }
@@ -110,6 +112,7 @@ pub(crate) struct Overrides {
     pub(crate) browser: Option<bool>,
     pub(crate) orca: Option<bool>,
     pub(crate) ghcr: Option<bool>,
+    pub(crate) paseo_relay: Option<bool>,
 }
 
 impl Overrides {
@@ -124,6 +127,7 @@ impl Overrides {
             || self.browser.is_some()
             || self.orca.is_some()
             || self.ghcr.is_some()
+            || self.paseo_relay.is_some()
     }
 }
 
@@ -173,6 +177,10 @@ pub(crate) fn run_wizard(
     let browser = prompt_bool("Install the Playwright browser MCP", current.browser)?;
     let orca = prompt_bool("Install the Orca remote server", current.orca)?;
     let ghcr = prompt_bool("Enable private GHCR proxy credentials", current.ghcr)?;
+    let paseo_relay = prompt_bool(
+        "Enable the authenticated Paseo remote relay",
+        current.paseo_relay,
+    )?;
 
     let profile = Profile {
         workspace: WorkspaceMode::parse(&workspace)?,
@@ -180,6 +188,7 @@ pub(crate) fn run_wizard(
         browser,
         orca,
         ghcr,
+        paseo_relay,
         github_proxy: true,
         resources: Resources {
             memory,
@@ -206,7 +215,7 @@ pub(crate) fn print(context: &Context, project: &Project, profile: &Profile) -> 
 }
 
 pub(crate) fn contract_bytes(profile: &Profile) -> Result<Vec<u8>, String> {
-    serde_json::to_vec(&to_json(profile))
+    serde_json::to_vec(&to_contract_json(profile))
         .map_err(|error| format!("could not serialize profile contract: {error}"))
 }
 
@@ -238,6 +247,9 @@ fn apply_overrides(profile: &mut Profile, overrides: &Overrides) {
     if let Some(value) = overrides.ghcr {
         profile.ghcr = value;
     }
+    if let Some(value) = overrides.paseo_relay {
+        profile.paseo_relay = value;
+    }
 }
 
 fn path(context: &Context, project: &Project) -> PathBuf {
@@ -249,10 +261,56 @@ fn path(context: &Context, project: &Project) -> PathBuf {
 
 fn read_saved(context: &Context, project: &Project) -> Result<Option<Profile>, String> {
     let path = path(context, project);
+    for directory in [&context.state_root, &context.state_root.join("profiles")] {
+        if directory.exists() {
+            inspect_protected_directory(directory)?;
+        }
+    }
+    inspect_protected_file(&path)?;
     match fs::read(&path) {
         Ok(bytes) => parse_json(&bytes, &path).map(Some),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("could not read {}: {error}", path.display())),
+    }
+}
+
+fn inspect_protected_directory(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("could not inspect {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "protected profile path is not a real directory: {}",
+            path.display()
+        ));
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(format!(
+            "protected profile directory is accessible to group/other users: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn inspect_protected_file(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => Err(format!(
+            "protected profile path is not a regular file: {}",
+            path.display()
+        )),
+        Ok(metadata) => {
+            #[cfg(unix)]
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err(format!(
+                    "protected profile is accessible to group/other users: {}",
+                    path.display()
+                ));
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("could not inspect {}: {error}", path.display())),
     }
 }
 
@@ -310,7 +368,11 @@ fn parse_json(bytes: &[u8], path: &Path) -> Result<Profile, String> {
         Some(Value::Object(value)) => value.clone(),
         Some(_) => return Err("integrations must be an object".to_owned()),
     };
-    reject_unknown(&integrations, &["browser", "orca", "ghcr"], "integrations")?;
+    reject_unknown(
+        &integrations,
+        &["browser", "orca", "ghcr", "paseoRelay"],
+        "integrations",
+    )?;
     let resources = match object.get("resources") {
         None => Map::new(),
         Some(Value::Object(value)) => value.clone(),
@@ -328,6 +390,7 @@ fn parse_json(bytes: &[u8], path: &Path) -> Result<Profile, String> {
         browser: bool_value(&integrations, "browser")?,
         orca: bool_value(&integrations, "orca")?,
         ghcr: bool_value(&integrations, "ghcr")?,
+        paseo_relay: bool_value(&integrations, "paseoRelay")?,
         github_proxy,
         resources: Resources {
             memory: string_value(&resources, "memory")?,
@@ -401,6 +464,29 @@ fn to_json(profile: &Profile) -> Value {
             "browser": profile.browser,
             "orca": profile.orca,
             "ghcr": profile.ghcr,
+            "paseoRelay": profile.paseo_relay,
+        },
+        "resources": {
+            "memory": profile.resources.memory,
+            "cpus": profile.resources.cpus,
+            "rootDisk": profile.resources.root_disk,
+            "dockerDisk": profile.resources.docker_disk,
+        }
+    })
+}
+
+/// Only creation-time choices belong in the Docker environment contract.
+/// Network policy and the Paseo relay are reconciled at runtime, so changing
+/// either never requires deleting a healthy sandbox.
+fn to_contract_json(profile: &Profile) -> Value {
+    json!({
+        "version": 1,
+        "workspace": profile.workspace.name(),
+        "githubProxy": profile.github_proxy,
+        "integrations": {
+            "browser": profile.browser,
+            "orca": profile.orca,
+            "ghcr": profile.ghcr,
         },
         "resources": {
             "memory": profile.resources.memory,
@@ -423,6 +509,12 @@ fn save(context: &Context, project: &Project, profile: &Profile) -> Result<(), S
 }
 
 pub(crate) fn validate(profile: &Profile, state_root: &Path) -> Result<(), String> {
+    if profile.paseo_relay && profile.network == NetworkProfile::Offline {
+        return Err(
+            "Paseo relay requires outbound relay.paseo.sh access and cannot be combined with the offline network profile"
+                .to_owned(),
+        );
+    }
     let memory = profile
         .resources
         .memory
@@ -693,7 +785,7 @@ mod tests {
               "workspace": "isolated",
               "network": "restricted",
               "githubProxy": true,
-              "integrations": {"browser": true, "orca": true, "ghcr": true},
+              "integrations": {"browser": true, "orca": true, "ghcr": true, "paseoRelay": true},
               "resources": {"memory":"8G", "cpus":4, "rootDisk":"20g", "dockerDisk":"8g"}
             }"#,
             Path::new("profile.json"),
@@ -702,7 +794,64 @@ mod tests {
         assert_eq!(profile.workspace, WorkspaceMode::Isolated);
         assert_eq!(profile.network, NetworkProfile::Restricted);
         assert_eq!(profile.resources.memory.as_deref(), Some("8g"));
-        assert!(profile.browser && profile.orca && profile.ghcr);
+        assert!(profile.browser && profile.orca && profile.ghcr && profile.paseo_relay);
+    }
+
+    #[test]
+    fn runtime_relay_choice_does_not_change_creation_contract() {
+        let base = Profile::default();
+        let mut relay = base.clone();
+        relay.paseo_relay = true;
+        assert_eq!(
+            contract_bytes(&base).unwrap(),
+            contract_bytes(&relay).unwrap()
+        );
+    }
+
+    #[test]
+    fn runtime_network_choice_does_not_change_creation_contract() {
+        let base = Profile::default();
+        for network in [NetworkProfile::Restricted, NetworkProfile::Offline] {
+            let mut changed = base.clone();
+            changed.network = network;
+            assert_eq!(
+                contract_bytes(&base).unwrap(),
+                contract_bytes(&changed).unwrap()
+            );
+        }
+
+        let mut invalid = base;
+        invalid.paseo_relay = true;
+        invalid.network = NetworkProfile::Offline;
+        assert!(validate(&invalid, Path::new("/tmp/state")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_unsafe_protected_profile_files() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let root = std::env::temp_dir().join(format!(
+            "sbxr-profile-security-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let profile = root.join("profile.json");
+        fs::write(&profile, b"{}\n").unwrap();
+        fs::set_permissions(&profile, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(inspect_protected_file(&profile).is_err());
+        fs::set_permissions(&profile, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(inspect_protected_file(&profile).is_ok());
+
+        let link = root.join("link.json");
+        symlink(&profile, &link).unwrap();
+        assert!(inspect_protected_file(&link).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

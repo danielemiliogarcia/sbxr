@@ -175,7 +175,10 @@ impl Project {
         let hash = sha256::hex_prefix(&identity, 4);
         let feature = if rocksdb.is_some() { "-rdb" } else { "" };
         let generated = format!("rust-{}{feature}-{base}-{hash}", preset.slug());
-        let overridden = env::var("SBXR_NAME").ok();
+        let overridden = env::var("SBXR_NAME")
+            .ok()
+            .map(|value| validate_sandbox_name(&value).map(str::to_owned))
+            .transpose()?;
         let name = overridden.clone().unwrap_or(generated);
         let isolated_name = overridden
             .unwrap_or_else(|| format!("rust-isolated-{}{feature}-{base}-{hash}", preset.slug()));
@@ -185,6 +188,23 @@ impl Project {
             path,
             name,
         })
+    }
+}
+
+fn validate_sandbox_name(value: &str) -> Result<&str, String> {
+    let valid = !value.is_empty()
+        && value.len() <= 128
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+    if valid {
+        Ok(value)
+    } else {
+        Err("SBXR_NAME must be 1-128 ASCII letters, digits, dots, dashes, or underscores and must start with a letter or digit".to_owned())
     }
 }
 
@@ -252,5 +272,16 @@ mod tests {
     fn sanitizes_names() {
         assert_eq!(sandbox_component(OsStr::new("My Rust App!")), "my-rust-app");
         assert_eq!(sandbox_component(OsStr::new("...")), "project");
+    }
+
+    #[test]
+    fn rejects_sandbox_name_path_traversal() {
+        assert_eq!(validate_sandbox_name("rust-test_1.2"), Ok("rust-test_1.2"));
+        for invalid in ["", ".hidden", "../escape", "path/name", "path\\name"] {
+            assert!(
+                validate_sandbox_name(invalid).is_err(),
+                "accepted {invalid}"
+            );
+        }
     }
 }

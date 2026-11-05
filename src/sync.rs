@@ -23,7 +23,6 @@ const CODEX_PATHS: &[&str] = &[
 
 const CLAUDE_PATHS: &[&str] = &[
     ".claude/CLAUDE.md",
-    ".claude/settings.local.json",
     ".claude/statusline.sh",
     ".claude/statusline-command.sh",
     ".claude/hooks",
@@ -40,7 +39,6 @@ const CLAUDE_PATHS: &[&str] = &[
 ];
 
 const PI_PATHS: &[&str] = &[
-    ".pi/agent/models.json",
     ".pi/agent/keybindings.json",
     ".pi/agent/provider-failover.json",
     ".pi/agent/skills",
@@ -169,6 +167,18 @@ pub fn capabilities(
         )?;
     }
     if claude {
+        mirror_sanitized_json_config(
+            sandbox_name,
+            preserve_xdg_state,
+            &home,
+            &home_text,
+            ".claude/settings.local.json",
+        )?;
+    }
+    if pi {
+        mirror_pi_models(sandbox_name, preserve_xdg_state, &home, &home_text)?;
+    }
+    if claude {
         mirror_claude_hook_tools(sandbox_name, preserve_xdg_state, &home)?;
     }
     if pi {
@@ -192,6 +202,7 @@ pub fn capabilities(
                 ],
                 excluded_host_keys: &[],
                 filter_unavailable_hooks: true,
+                filter_credentials: true,
             },
         )?;
     }
@@ -206,10 +217,43 @@ pub fn capabilities(
                 managed_keys: &["defaultProjectTrust", "enableInstallTelemetry"],
                 excluded_host_keys: &[],
                 filter_unavailable_hooks: false,
+                filter_credentials: true,
             },
         )?;
     }
     Ok(())
+}
+
+fn mirror_sanitized_json_config(
+    sandbox_name: &str,
+    preserve_xdg_state: bool,
+    home: &Path,
+    home_text: &str,
+    relative: &str,
+) -> Result<(), String> {
+    let path = home.join(relative);
+    if !path.is_file() {
+        return Ok(());
+    }
+    let mut value: Value = serde_json::from_slice(
+        &fs::read(&path).map_err(|error| format!("could not read {}: {error}", path.display()))?,
+    )
+    .map_err(|error| format!("could not parse {}: {error}", path.display()))?;
+    let removed = remove_json_credentials(&mut value);
+    if removed > 0 {
+        eprintln!(
+            "warning: omitted {removed} credential-shaped field(s) while mirroring {relative}"
+        );
+    }
+    replace_json_paths(&mut value, home_text);
+    let bytes = serde_json::to_vec_pretty(&value)
+        .map_err(|error| format!("could not serialize {}: {error}", path.display()))?;
+    upload_file(
+        sandbox_name,
+        preserve_xdg_state,
+        &format!("/home/agent/{relative}"),
+        &bytes,
+    )
 }
 
 fn pi_extensions_enabled() -> Result<bool, String> {
@@ -221,6 +265,95 @@ fn pi_extensions_enabled() -> Result<bool, String> {
         };
     }
     Ok(true)
+}
+
+fn mirror_pi_models(
+    sandbox_name: &str,
+    preserve_xdg_state: bool,
+    home: &Path,
+    home_text: &str,
+) -> Result<(), String> {
+    let path = home.join(".pi/agent/models.json");
+    if !path.is_file() {
+        return Ok(());
+    }
+    let (bytes, removed) = sanitized_pi_models(&path, home_text)?;
+    if removed > 0 {
+        eprintln!(
+            "warning: omitted {removed} literal Pi model credential field(s) while mirroring host configuration"
+        );
+    }
+    upload_file(
+        sandbox_name,
+        preserve_xdg_state,
+        "/home/agent/.pi/agent/models.json",
+        &bytes,
+    )
+}
+
+fn sanitized_pi_models(path: &Path, host_home: &str) -> Result<(Vec<u8>, usize), String> {
+    let mut value: Value = serde_json::from_slice(
+        &fs::read(path).map_err(|error| format!("could not read {}: {error}", path.display()))?,
+    )
+    .map_err(|error| format!("could not parse {}: {error}", path.display()))?;
+    if !value.is_object() {
+        return Err(format!(
+            "could not mirror {}: expected a JSON object",
+            path.display()
+        ));
+    }
+    let mut removed = 0;
+    remove_pi_model_credentials(&mut value, &mut removed);
+    replace_json_paths(&mut value, host_home);
+    let bytes = serde_json::to_vec_pretty(&value)
+        .map_err(|error| format!("could not serialize {}: {error}", path.display()))?;
+    Ok((bytes, removed))
+}
+
+fn remove_pi_model_credentials(value: &mut Value, removed: &mut usize) {
+    match value {
+        Value::Object(object) => {
+            if object
+                .get("apiKey")
+                .is_some_and(|value| !safe_pi_config_reference(value))
+            {
+                object.remove("apiKey");
+                *removed += 1;
+            }
+            if let Some(Value::Object(headers)) = object.get_mut("headers") {
+                let before = headers.len();
+                headers.retain(|_, value| safe_pi_config_reference(value));
+                *removed += before - headers.len();
+            }
+            for child in object.values_mut() {
+                remove_pi_model_credentials(child, removed);
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                remove_pi_model_credentials(child, removed);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn safe_pi_config_reference(value: &Value) -> bool {
+    let Some(value) = value.as_str() else {
+        return false;
+    };
+    let name = value
+        .strip_prefix("${")
+        .and_then(|value| value.strip_suffix('}'))
+        .or_else(|| value.strip_prefix('$'));
+    name.is_some_and(|name| {
+        !name.is_empty()
+            && name.chars().enumerate().all(|(index, character)| {
+                character == '_'
+                    || character.is_ascii_alphanumeric()
+                        && (index > 0 || !character.is_ascii_digit())
+            })
+    })
 }
 
 fn mirror_claude_hook_tools(
@@ -671,6 +804,7 @@ struct JsonMergePolicy<'a> {
     managed_keys: &'a [&'a str],
     excluded_host_keys: &'a [&'a str],
     filter_unavailable_hooks: bool,
+    filter_credentials: bool,
 }
 
 fn merge_json_settings(
@@ -695,6 +829,15 @@ fn merge_json_settings(
             remote_program_exists(sandbox_name, preserve_xdg_state, program)
         })?;
     }
+    if policy.filter_credentials {
+        let removed = remove_json_credentials(&mut host);
+        if removed > 0 {
+            eprintln!(
+                "warning: omitted {removed} credential-shaped field(s) while mirroring {}",
+                host_path.display()
+            );
+        }
+    }
     let managed = remote_file(sandbox_name, preserve_xdg_state, remote_path)?
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .unwrap_or_else(|| Value::Object(Map::new()));
@@ -716,6 +859,92 @@ fn merge_json_settings(
     let bytes = serde_json::to_vec_pretty(&merged)
         .map_err(|error| format!("could not serialize merged settings: {error}"))?;
     upload_file(sandbox_name, preserve_xdg_state, remote_path, &bytes)
+}
+
+fn remove_json_credentials(value: &mut Value) -> usize {
+    match value {
+        Value::Object(object) => {
+            let sensitive = object
+                .iter()
+                .filter(|(key, value)| credential_field(key, value))
+                .map(|(key, _)| key)
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut removed = sensitive.len();
+            for key in sensitive {
+                object.remove(&key);
+            }
+            for child in object.values_mut() {
+                removed += remove_json_credentials(child);
+            }
+            removed
+        }
+        Value::Array(array) => array.iter_mut().map(remove_json_credentials).sum(),
+        _ => 0,
+    }
+}
+
+fn credential_field(key: &str, value: &Value) -> bool {
+    let compact = key
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    let exact = matches!(
+        compact.as_str(),
+        "access"
+            | "refresh"
+            | "authorization"
+            | "cookie"
+            | "token"
+            | "tokens"
+            | "secret"
+            | "secrets"
+            | "password"
+            | "passwords"
+            | "apikey"
+            | "apikeys"
+            | "privatekey"
+            | "privatekeys"
+            | "credential"
+            | "credentials"
+    );
+    let singular = [
+        "token",
+        "secret",
+        "password",
+        "apikey",
+        "privatekey",
+        "cookie",
+    ]
+    .iter()
+    .any(|suffix| compact.ends_with(suffix) && !compact.ends_with(&format!("{suffix}s")));
+    let plural = [
+        "secrets",
+        "passwords",
+        "apikeys",
+        "privatekeys",
+        "credentials",
+    ]
+    .iter()
+    .any(|suffix| compact.ends_with(suffix) && compact.len() > suffix.len())
+        || ["tokens", "cookies"].iter().any(|suffix| {
+            compact
+                .strip_suffix(suffix)
+                .is_some_and(credential_qualifier)
+        });
+    exact
+        || singular
+        || (plural && matches!(value, Value::String(_) | Value::Array(_) | Value::Object(_)))
+}
+
+fn credential_qualifier(prefix: &str) -> bool {
+    [
+        "access", "api", "auth", "bearer", "client", "id", "identity", "oauth", "refresh",
+        "session",
+    ]
+    .iter()
+    .any(|qualifier| prefix.ends_with(qualifier))
 }
 
 fn prune_unavailable_claude_hooks<F>(
@@ -1176,6 +1405,92 @@ mod tests {
             parse_bootstrap_state(b"not json"),
             BootstrapState::default()
         );
+    }
+
+    #[test]
+    fn removes_literal_pi_model_credentials_but_keeps_environment_references() {
+        let root = std::env::temp_dir().join(format!("sbxr-pi-model-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("models.json");
+        fs::write(
+            &path,
+            br#"{
+              "providers": {
+                "literal": {
+                  "apiKey": "reusable-secret",
+                  "headers": {"Authorization": "Bearer reusable-secret"}
+                },
+                "environment": {
+                  "apiKey": "$SAFE_API_KEY",
+                  "headers": {"Authorization": "${SAFE_HEADER}"}
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let (bytes, removed) = sanitized_pi_models(&path, "/host/home").unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        let providers = value["providers"].as_object().unwrap();
+        assert_eq!(removed, 2);
+        assert!(providers["literal"].get("apiKey").is_none());
+        assert!(
+            providers["literal"]["headers"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(providers["environment"]["apiKey"], "$SAFE_API_KEY");
+        assert_eq!(
+            providers["environment"]["headers"]["Authorization"],
+            "${SAFE_HEADER}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_unsafe_pi_credential_references() {
+        for value in [
+            Value::String("literal".to_owned()),
+            Value::String("!host-command".to_owned()),
+            Value::String("Bearer $TOKEN".to_owned()),
+            Value::String("$9INVALID".to_owned()),
+            Value::Bool(true),
+        ] {
+            assert!(!safe_pi_config_reference(&value));
+        }
+        for value in ["$TOKEN", "${TOKEN}", "$_TOKEN_2"] {
+            assert!(safe_pi_config_reference(&Value::String(value.to_owned())));
+        }
+    }
+
+    #[test]
+    fn removes_nested_agent_credentials_without_mistaking_model_limits() {
+        let mut value = serde_json::json!({
+            "env": {
+                "ANTHROPIC_API_KEY": "reusable",
+                "SAFE_COLOR": "blue"
+            },
+            "headers": {
+                "Authorization": "Bearer reusable",
+                "User-Agent": "sbxr"
+            },
+            "authTokens": ["reusable-one", "reusable-two"],
+            "clientSecrets": {"production": "reusable"},
+            "maxTokens": 4096,
+            "outputTokens": 2048,
+            "refreshTokenExpiresAt": 1234
+        });
+        assert_eq!(remove_json_credentials(&mut value), 4);
+        assert!(value["env"].get("ANTHROPIC_API_KEY").is_none());
+        assert_eq!(value["env"]["SAFE_COLOR"], "blue");
+        assert!(value["headers"].get("Authorization").is_none());
+        assert_eq!(value["headers"]["User-Agent"], "sbxr");
+        assert!(value.get("authTokens").is_none());
+        assert!(value.get("clientSecrets").is_none());
+        assert_eq!(value["maxTokens"], 4096);
+        assert_eq!(value["outputTokens"], 2048);
+        assert_eq!(value["refreshTokenExpiresAt"], 1234);
     }
 
     #[test]

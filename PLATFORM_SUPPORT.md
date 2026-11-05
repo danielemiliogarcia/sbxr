@@ -37,6 +37,10 @@ Docker Desktop and Docker Engine are not required merely to run Docker
 Sandboxes. Refer to Docker's current
 [installation guide](https://docs.docker.com/ai/sandboxes/install/) before
 installing because its supported versions and commands can change.
+sbxr checks the Docker client and server independently and probes the required
+Kits v3, environment, skills, and structured-port command capabilities before
+lifecycle work; a new client connected to an old server is not considered a
+supported installation.
 
 After installing the host prerequisites, the common setup is:
 
@@ -61,16 +65,18 @@ Linux is currently the only host platform supported by the optional
 `--rocksdb-host` acceleration. Without that option, RocksDB and other native
 dependencies build normally inside the sandbox.
 
-For targeted graceful closing before `sbxr stop`, install `wmctrl` on an X11
-desktop (`sudo apt-get install wmctrl` on Ubuntu). If the window cannot be
-targeted safely, `sbxr` does not stop the microVM until the developer closes
-that Remote-SSH window manually. Native Wayland, macOS, and Windows automatic
-window closing still require dedicated live validation.
+For targeted graceful closing before `sbxr stop` or `sbxr rm`, install
+`wmctrl` on an X11 desktop (`sudo apt-get install wmctrl` on Ubuntu). If the
+window cannot be targeted safely, `sbxr` does not stop or remove the microVM
+until the developer closes that Remote-SSH window manually. Native Wayland,
+macOS, and Windows automatic window closing still require dedicated live
+validation.
 
 ## VS Code state across a microVM stop
 
 `sbxr stop` closes the matching Remote-SSH window gracefully before powering
-off the microVM. VS Code stores its window/workspace state on the host, while
+off the microVM, and `sbxr rm` does the same before removing it. VS Code stores
+its window/workspace state on the host, while
 the remote VS Code Server data remains on the sandbox's persistent disk. The
 launcher also enables VS Code's terminal process-revive settings and requests
 10,000 lines of persistent scrollback.
@@ -162,11 +168,15 @@ Before marking another host as tested, verify:
 5. Native VS Code connects through Remote-SSH, mirrors compatible extensions,
    preserves remote window state, and opens the intended project directory.
 6. Codex, Claude, and Pi subscription authentication works as documented.
+   Run both `sbxr verify .` and the explicit subscription-consuming
+   `sbxr verify --live .`, then confirm `sbxr status .` records healthy stages.
 7. Rust build, test, debugger, source navigation, and Cargo audit workflows run
    inside the sandbox.
 8. The forwarded SSH agent supports GitHub authentication and a disposable
    signed commit without copying private keys into the sandbox.
 9. Paths containing spaces and non-ASCII characters work correctly.
+10. An Orca-enabled sandbox receives an ephemeral `127.0.0.1` host mapping and
+    its pairing link reaches that mapping; no wildcard/public listener exists.
 
 Docker's [editor integration guide](https://docs.docker.com/ai/sandboxes/integrations/)
 describes the platform-specific SSH configuration used by `sbxr`.

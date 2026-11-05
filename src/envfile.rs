@@ -209,6 +209,50 @@ pub(crate) fn definition_path(context: &Context, sandbox_name: &str) -> PathBuf 
         .join("definitions/.sbxenv.yaml")
 }
 
+pub(crate) fn read_network_policy_record(
+    context: &Context,
+    sandbox_name: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let state_directory = context.state_root.join("projects").join(sandbox_name);
+    let metadata_directory = state_directory.join("metadata");
+    let path = metadata_directory.join("network-policy.json");
+    reject_symlink_components(&path)?;
+    for directory in [
+        &context.state_root,
+        &context.state_root.join("projects"),
+        &state_directory,
+        &metadata_directory,
+    ] {
+        if directory.exists() {
+            inspect_secure_directory(directory)?;
+        }
+    }
+    reject_symlink_file(&path)?;
+    match fs::read(&path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("could not read {}: {error}", path.display())),
+    }
+}
+
+pub(crate) fn write_network_policy_record(
+    context: &Context,
+    sandbox_name: &str,
+    contents: &[u8],
+) -> Result<(), String> {
+    let state_directory = context.state_root.join("projects").join(sandbox_name);
+    let metadata_directory = state_directory.join("metadata");
+    for directory in [
+        &context.state_root,
+        &context.state_root.join("projects"),
+        &state_directory,
+        &metadata_directory,
+    ] {
+        secure_directory(directory)?;
+    }
+    atomic_write(&metadata_directory.join("network-policy.json"), contents)
+}
+
 pub(crate) fn inspect(
     context: &Context,
     project: &Project,
@@ -455,7 +499,10 @@ fn render(
     output.push_str("\n  clone: ");
     output.push_str(if clone { "true" } else { "false" });
     output.push('\n');
-    if profile.resources.memory.is_some() || profile.resources.cpus.is_some() {
+    if profile.resources.memory.is_some()
+        || profile.resources.cpus.is_some()
+        || matches!(kind, Kind::Review)
+    {
         output.push_str("sandboxOptions:\n");
         if let Some(memory) = &profile.resources.memory {
             output.push_str("  memory: ");
@@ -466,6 +513,9 @@ fn render(
             output.push_str("  cpus: ");
             output.push_str(&cpus.to_string());
             output.push('\n');
+        }
+        if matches!(kind, Kind::Review) {
+            output.push_str("  skills: off\n");
         }
     }
     output.push_str("kits:\n");
@@ -504,9 +554,7 @@ fn render(
             );
         }
         if profile.orca {
-            output.push_str("ports:\n  - host: ");
-            output.push_str(&orca_host_port(sandbox_name).to_string());
-            output.push_str("\n    sandbox: 6768\n    hostIP: 127.0.0.1\n");
+            output.push_str("ports:\n  - sandbox: 6768\n    hostIP: 127.0.0.1\n");
         }
     }
     if let Some(rocksdb) = rocksdb {
@@ -651,11 +699,6 @@ fn contract_hash(
         }
     }
     Ok(sha256::hex(&input))
-}
-
-pub(crate) fn orca_host_port(sandbox_name: &str) -> u16 {
-    let digest = sha256::digest(sandbox_name.as_bytes());
-    42000 + u16::from_be_bytes([digest[0], digest[1]]) % 10000
 }
 
 fn kit_contract_files(root: &Path) -> Result<Vec<PathBuf>, String> {
@@ -1001,6 +1044,20 @@ mod tests {
         assert!(!review.contains("github-ssh"));
         assert!(!review.contains("claude-cli"));
         assert!(!review.contains("bindings:"));
+        assert!(review.contains("sandboxOptions:\n  skills: off"));
+
+        let mut orca_profile = profile.clone();
+        orca_profile.orca = true;
+        let orca = render(
+            &context,
+            &project,
+            Kind::Development(Preset::MultiAgent),
+            None,
+            &orca_profile,
+        )
+        .unwrap();
+        assert!(orca.contains("ports:\n  - sandbox: 6768\n    hostIP: 127.0.0.1"));
+        assert!(!orca.contains("  - host:"));
 
         let codex = render(
             &context,

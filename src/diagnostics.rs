@@ -1,4 +1,5 @@
 use crate::environment::Context;
+use crate::sbx::RuntimeInfo;
 use serde_json::{Value, json};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -15,6 +16,7 @@ pub(crate) struct Report {
     path: PathBuf,
     command: String,
     events: Vec<Value>,
+    runtime: Option<Value>,
 }
 
 impl Report {
@@ -34,6 +36,7 @@ impl Report {
             path,
             command: command.to_owned(),
             events: Vec::new(),
+            runtime: None,
         };
         report.event("command", "started", None)?;
         Ok(report)
@@ -51,6 +54,18 @@ impl Report {
             "stage": safe_component(stage),
             "status": safe_component(status),
             "category": category.map(safe_component),
+            "reason": category.map(safe_component),
+            "source": "sbxr",
+        }));
+        self.flush()
+    }
+
+    pub(crate) fn runtime(&mut self, info: &RuntimeInfo) -> Result<(), String> {
+        self.runtime = Some(json!({
+            "client": info.client.to_string(),
+            "server": info.server.to_string(),
+            "api": info.api_version,
+            "serverState": safe_component(&info.server_state),
         }));
         self.flush()
     }
@@ -70,6 +85,8 @@ impl Report {
             "version": 1,
             "command": self.command,
             "events": self.events,
+            "runtime": self.runtime,
+            "sbxrVersion": env!("CARGO_PKG_VERSION"),
             "privacy": {
                 "argumentsRecorded": false,
                 "environmentRecorded": false,
@@ -82,9 +99,98 @@ impl Report {
     }
 }
 
+pub(crate) fn summarize_latest(context: &Context) -> Result<(), String> {
+    let directory = context.state_root.join("diagnostics");
+    let mut reports = match fs::read_dir(&directory) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                let metadata = fs::symlink_metadata(&path).ok()?;
+                (metadata.file_type().is_file()
+                    && path.extension().is_some_and(|ext| ext == "json"))
+                .then_some((metadata.modified().ok()?, path))
+            })
+            .collect::<Vec<_>>(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err("no sbxr diagnostic reports exist yet".to_owned());
+        }
+        Err(error) => {
+            return Err(format!(
+                "could not inspect {}: {error}",
+                directory.display()
+            ));
+        }
+    };
+    reports.sort_by_key(|entry| entry.0);
+    let path = reports
+        .last()
+        .map(|(_, path)| path)
+        .ok_or("no sbxr diagnostic reports exist yet")?;
+    let bytes =
+        fs::read(path).map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    let document: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("invalid diagnostic report {}: {error}", path.display()))?;
+    if document.get("version").and_then(Value::as_u64) != Some(1) {
+        return Err(format!("unsupported diagnostic report: {}", path.display()));
+    }
+    println!(
+        "diagnostic report (newest across all projects): {}",
+        path.display()
+    );
+    println!(
+        "command: {}",
+        document
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+    );
+    if let Some(runtime) = document.get("runtime").and_then(Value::as_object) {
+        println!(
+            "runtime: client {} · server {} · API {}",
+            runtime
+                .get("client")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            runtime
+                .get("server")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            runtime
+                .get("api")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        );
+    }
+    let events = document
+        .get("events")
+        .and_then(Value::as_array)
+        .ok_or("diagnostic report has no events array")?;
+    for event in events {
+        let stage = event
+            .get("stage")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let status = event
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let category = event.get("category").and_then(Value::as_str);
+        println!(
+            "  {stage:<20} {status}{}",
+            category.map_or(String::new(), |value| format!(" ({value})"))
+        );
+    }
+    Ok(())
+}
+
 fn classify(error: &str) -> &'static str {
     let lower = error.to_ascii_lowercase();
-    if lower.contains("credential") || lower.contains("oauth") || lower.contains("secret") {
+    if lower.contains("credential")
+        || lower.contains("oauth")
+        || lower.contains("secret")
+        || lower.contains("authentication")
+    {
         "authentication"
     } else if lower.contains("network") || lower.contains("policy") {
         "network-policy"
@@ -100,6 +206,17 @@ fn classify(error: &str) -> &'static str {
         "toolchain"
     } else if lower.contains("profile") || lower.contains("wizard") {
         "configuration"
+    } else if lower.contains("provider")
+        || lower.contains("rate-limit")
+        || lower.contains("model-unavailable")
+    {
+        "provider"
+    } else if lower.contains("orca")
+        || lower.contains("paseo")
+        || lower.contains("browser")
+        || lower.contains("integration")
+    {
+        "integration"
     } else {
         "operation"
     }
@@ -195,6 +312,8 @@ mod tests {
     fn failure_classification_is_redacted_and_stable() {
         assert_eq!(classify("token value abc failed OAuth"), "authentication");
         assert_eq!(classify("rustup toolchain missing"), "toolchain");
+        assert_eq!(classify("live pi provider-error"), "provider");
+        assert_eq!(classify("Orca failed to start"), "integration");
         assert_eq!(classify("arbitrary private detail"), "operation");
     }
 

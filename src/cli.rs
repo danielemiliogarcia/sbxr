@@ -137,6 +137,8 @@ impl Cli {
                 "--no-orca" => profile.orca = Some(false),
                 "--ghcr" => profile.ghcr = Some(true),
                 "--no-ghcr" => profile.ghcr = Some(false),
+                "--paseo-relay" => profile.paseo_relay = Some(true),
+                "--no-paseo-relay" => profile.paseo_relay = Some(false),
                 _ if text.starts_with("--preset=") => {
                     preset = Preset::parse(OsStr::new(text.trim_start_matches("--preset=")))?;
                 }
@@ -223,6 +225,46 @@ pub(crate) struct SignRequest {
     pub(crate) selection: SignSelection,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AuthProvider {
+    OpenAi,
+    Anthropic,
+    GitHub,
+}
+
+impl AuthProvider {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "openai" | "codex" | "chatgpt" => Ok(Self::OpenAi),
+            "anthropic" | "claude" => Ok(Self::Anthropic),
+            "github" | "gh" => Ok(Self::GitHub),
+            _ => Err(format!(
+                "unknown authentication provider '{value}'; expected openai, anthropic, or github"
+            )),
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
+            Self::GitHub => "github",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct VerifyRequest {
+    pub(crate) path: Option<PathBuf>,
+    pub(crate) live: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct AuthRenewRequest {
+    pub(crate) provider: AuthProvider,
+    pub(crate) path: Option<PathBuf>,
+}
+
 #[derive(Debug)]
 pub(crate) enum Action {
     New(Option<PathBuf>),
@@ -240,9 +282,12 @@ pub(crate) enum Action {
     Profile(Option<PathBuf>),
     AuthImport(Option<PathBuf>),
     AuthStatus(Option<PathBuf>),
+    AuthRenew(AuthRenewRequest),
     Audit(Option<PathBuf>),
     CommitPgpSign(SignRequest),
-    Verify(Option<PathBuf>),
+    Verify(VerifyRequest),
+    Repair(Option<PathBuf>),
+    Diagnose(Option<PathBuf>),
     Review(Option<PathBuf>),
     Inspect(Option<PathBuf>),
     Name(Option<PathBuf>),
@@ -280,6 +325,12 @@ impl Action {
         if command == "commit-pgp-sign" {
             return Self::parse_sign(&arguments[1..]);
         }
+        if command == "auth" {
+            return Self::parse_auth(&arguments[1..]);
+        }
+        if command == "verify" {
+            return Self::parse_verify(&arguments[1..]);
+        }
         if arguments.len() > 2 {
             return Err("expected at most one project path".to_owned());
         }
@@ -301,7 +352,8 @@ impl Action {
             "auth-import" => Self::AuthImport(path),
             "auth-status" => Self::AuthStatus(path),
             "audit" => Self::Audit(path),
-            "verify" => Self::Verify(path),
+            "repair" => Self::Repair(path),
+            "diagnose" => Self::Diagnose(path),
             "review" => Self::Review(path),
             "inspect" => Self::Inspect(path),
             "name" => Self::Name(path),
@@ -311,6 +363,46 @@ impl Action {
             _ if arguments.len() == 1 => Self::New(Some(PathBuf::from(&arguments[0]))),
             _ => return Err(format!("unknown command: {command}")),
         })
+    }
+
+    fn parse_auth(arguments: &[OsString]) -> Result<Self, String> {
+        if arguments.first().and_then(|value| value.to_str()) != Some("renew") {
+            return Err("usage: sbxr auth renew openai|anthropic|github [PATH]".to_owned());
+        }
+        let provider = arguments
+            .get(1)
+            .and_then(|value| value.to_str())
+            .ok_or("usage: sbxr auth renew openai|anthropic|github [PATH]")?;
+        if arguments.len() > 3 {
+            return Err("auth renew accepts one provider and at most one project path".to_owned());
+        }
+        Ok(Self::AuthRenew(AuthRenewRequest {
+            provider: AuthProvider::parse(provider)?,
+            path: arguments.get(2).map(PathBuf::from),
+        }))
+    }
+
+    fn parse_verify(arguments: &[OsString]) -> Result<Self, String> {
+        let mut path = None;
+        let mut live = false;
+        for argument in arguments {
+            if argument == "--live" {
+                if live {
+                    return Err("verify accepts --live only once".to_owned());
+                }
+                live = true;
+            } else if argument.to_string_lossy().starts_with('-') {
+                return Err(format!(
+                    "unknown verify option: {}",
+                    argument.to_string_lossy()
+                ));
+            } else if path.is_some() {
+                return Err("verify accepts at most one project path".to_owned());
+            } else {
+                path = Some(PathBuf::from(argument));
+            }
+        }
+        Ok(Self::Verify(VerifyRequest { path, live }))
     }
 
     fn parse_sign(arguments: &[OsString]) -> Result<Self, String> {
@@ -395,7 +487,9 @@ impl Action {
                 | Self::Isolated(_)
                 | Self::Wizard(_)
                 | Self::AuthStatus(_)
+                | Self::AuthRenew(_)
                 | Self::Audit(_)
+                | Self::Repair(_)
                 | Self::CommitPgpSign(_)
                 | Self::Review(_)
                 | Self::Remove { .. }
@@ -420,12 +514,15 @@ impl Action {
             | Self::AuthImport(path)
             | Self::AuthStatus(path)
             | Self::Audit(path)
-            | Self::Verify(path)
+            | Self::Repair(path)
+            | Self::Diagnose(path)
             | Self::Review(path)
             | Self::Inspect(path)
             | Self::Name(path)
             | Self::Status(path)
             | Self::Stop(path) => path.as_deref(),
+            Self::Verify(request) => request.path.as_deref(),
+            Self::AuthRenew(request) => request.path.as_deref(),
             Self::CommitPgpSign(request) => request.path.as_deref(),
             Self::Remove { path, .. } => path.as_deref(),
             Self::Doctor(path) => path.as_deref(),
@@ -442,6 +539,8 @@ impl Action {
             | Self::Wizard(_) => &["sbx", "code", "ssh"],
             Self::Review(_) => &["sbx", "code", "ssh", "git"],
             Self::CommitPgpSign(_) => &["git"],
+            Self::AuthRenew(request) if request.provider == AuthProvider::GitHub => &["sbx", "gh"],
+            Self::AuthRenew(_) => &["sbx"],
             Self::Up(_)
             | Self::Shell(_)
             | Self::Codex(_)
@@ -453,6 +552,7 @@ impl Action {
             | Self::AuthStatus(_)
             | Self::Audit(_)
             | Self::Verify(_)
+            | Self::Repair(_)
             | Self::Status(_)
             | Self::Stop(_)
             | Self::Remove { .. } => &["sbx"],
@@ -461,6 +561,7 @@ impl Action {
             | Self::Name(_)
             | Self::Setup
             | Self::Doctor(_)
+            | Self::Diagnose(_)
             | Self::Version
             | Self::Help => &[],
         }
@@ -495,8 +596,10 @@ impl Action {
                 | Self::Wizard(_)
                 | Self::AuthImport(_)
                 | Self::AuthStatus(_)
+                | Self::AuthRenew(_)
                 | Self::Audit(_)
                 | Self::Verify(_)
+                | Self::Repair(_)
                 | Self::Review(_)
         )
     }
@@ -524,6 +627,8 @@ Usage:
   sbxr profile [PATH]      Print the protected nonsecret project profile
   sbxr auth-import [PATH]  Explain the removal of sandbox credential imports
   sbxr auth-status [PATH]  Show subscription login status
+  sbxr auth renew PROVIDER [PATH]
+                           Renew openai, anthropic, or github through its proxy flow
   sbxr audit [PATH]        Run cargo-audit, cargo-deny, and cargo-vet
   sbxr commit-pgp-sign [PATH]
                            Amend HEAD on the host with an OpenPGP signature
@@ -532,6 +637,10 @@ Usage:
   sbxr commit-pgp-sign --range BASE..HEAD [PATH]
                            Sign your unsigned commits in an explicit range
   sbxr verify [PATH]       Audit runtime identity, credentials, tools, and SSH agent
+  sbxr verify --live [PATH]
+                           Also make minimal Codex, Claude, and Pi model requests
+  sbxr repair [PATH]       Reconcile missing/outdated integrations and verify them
+  sbxr diagnose [PATH]     Summarize the newest redacted diagnostic report
   sbxr review [PATH]       Open a no-OAuth clone-mode review sandbox
   sbxr inspect [PATH]      Show the protected environment declaration
   sbxr name [PATH]         Print the deterministic sandbox name
@@ -555,6 +664,8 @@ Options:
   --browser | --no-browser Enable/disable the isolated Playwright MCP
   --orca | --no-orca       Enable/disable the Orca remote server
   --ghcr | --no-ghcr       Enable/disable host-proxied private GHCR credentials
+  --paseo-relay | --no-paseo-relay
+                           Enable/disable the authenticated remote Paseo relay
   --preset PRESET          rust-multi-agent, rust-codex, or rust-claude
   --rocksdb-host[=PREFIX]  Mount a trusted host RocksDB prefix read-only
 
@@ -610,7 +721,30 @@ mod tests {
         ));
         assert!(matches!(
             Action::parse(vec!["verify".into(), "/tmp/project".into()]).unwrap(),
-            Action::Verify(Some(_))
+            Action::Verify(VerifyRequest {
+                path: Some(_),
+                live: false
+            })
+        ));
+        assert!(matches!(
+            Action::parse(vec!["verify".into(), "--live".into()]).unwrap(),
+            Action::Verify(VerifyRequest {
+                path: None,
+                live: true
+            })
+        ));
+        assert!(matches!(
+            Action::parse(vec![
+                "auth".into(),
+                "renew".into(),
+                "anthropic".into(),
+                "/tmp/project".into()
+            ])
+            .unwrap(),
+            Action::AuthRenew(AuthRenewRequest {
+                provider: AuthProvider::Anthropic,
+                path: Some(_)
+            })
         ));
         assert!(matches!(
             Action::parse(vec!["commit-pgp-sign".into()]).unwrap(),
@@ -712,10 +846,25 @@ mod tests {
         assert!(!sign.needs_vscode_remote_ssh());
         assert!(!sign.needs_kvm());
 
-        let verify = Action::Verify(None);
+        let verify = Action::Verify(VerifyRequest {
+            path: None,
+            live: false,
+        });
         assert_eq!(verify.required_host_commands(), ["sbx"]);
         assert!(!verify.needs_vscode_remote_ssh());
         assert!(verify.needs_kvm());
+
+        let github_renew = Action::AuthRenew(AuthRenewRequest {
+            provider: AuthProvider::GitHub,
+            path: None,
+        });
+        assert_eq!(github_renew.required_host_commands(), ["sbx", "gh"]);
+
+        let openai_renew = Action::AuthRenew(AuthRenewRequest {
+            provider: AuthProvider::OpenAi,
+            path: None,
+        });
+        assert_eq!(openai_renew.required_host_commands(), ["sbx"]);
 
         let shell = Action::Shell(None);
         assert_eq!(shell.required_host_commands(), ["sbx"]);

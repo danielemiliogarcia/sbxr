@@ -1,5 +1,5 @@
 use crate::environment::Context;
-use crate::{envfile, process, sbx};
+use crate::{process, sbx};
 use serde_json::Value;
 
 const VERSION: &str = "1.4.247";
@@ -7,6 +7,81 @@ const X64_SHA512_BASE64: &str =
     "ivVcVrtn7nXvjBWlduQpvekKdY0i6SYfQaZRlmc3h3anN+BPv0tLC6sI6jRsv9ecOzCrMpqYp+pxNXgebsQLGA==";
 const ARM64_SHA512_BASE64: &str =
     "bsI3xfKZzAeoj2JnQRGwcDLhF4u81uQpPf6BdBCXb4LC1n9ujVUXdtsqAbSSgA5y02oOkflpl8CZc+TzlmonBQ==";
+const PAIRING_SCRIPT: &str = r#"set -euo pipefail
+state=/home/agent/.local/state/sbxr
+log="$state/orca-server.log"
+pidfile="$state/orca-server.pid"
+data_root=/home/agent/.config/orca
+mkdir -p "$state"
+
+start_orca() {
+  rm -f "$log" "$pidfile"
+  nohup /usr/local/bin/sbxr-orca-server serve --port 6768 --pairing-address 127.0.0.1 >"$log" 2>&1 </dev/null &
+  printf '%s\n' "$!" > "$pidfile"
+}
+
+clear_recreated_vm_lock() {
+  lock="$data_root/orcad.lock"
+  reason=$(tail -n 1 "$reclaim_log" 2>/dev/null || true)
+  printf '%s\n' "$reason" | jq -e \
+    'select(.status == "refused" and (.message | contains("different machine id")))' \
+    >/dev/null || return 1
+  [ ! -L "$lock" ] && [ -f "$lock" ] || return 1
+  [ "$(stat -c '%u' "$lock")" = "$(id -u)" ] || return 1
+  [ "$(stat -c '%a' "$lock")" = 600 ] || return 1
+  identity=$(stat -c '%d:%i' "$lock")
+  pid=$(jq -er '.pid | select(type == "number" and . > 1 and floor == .) | tostring' "$lock") \
+    || return 1
+  ticks=$(jq -er '.linuxStartTicks | select(type == "string" and test("^[0-9]+$"))' "$lock") \
+    || return 1
+  if [ -r "/proc/$pid/stat" ]; then
+    current_ticks=$(sed 's/^.*) //' "/proc/$pid/stat" | awk '{print $20}')
+    [ "$current_ticks" != "$ticks" ] || return 1
+  fi
+  [ "$(stat -c '%d:%i' "$lock")" = "$identity" ] || return 1
+  rm -f -- "$lock"
+}
+
+if ! [ -s "$pidfile" ] || ! kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+  start_orca
+fi
+
+reclaimed=0
+for attempt in $(seq 1 60); do
+  link=$(grep -Eo '(orca|https?)://[^[:space:]]+' "$log" 2>/dev/null | tail -n1 || true)
+  if [ -n "$link" ]; then printf '%s\n' "$link"; exit 0; fi
+  if [ "$reclaimed" -eq 0 ] \
+    && grep -q 'OrcadInstanceLockError' "$log" 2>/dev/null; then
+    reclaim_log="$state/orca-reclaim.log"
+    set +e
+    /usr/local/bin/sbxr-orca-server serve \
+      --reclaim-stale-lock --data-root "$data_root" --yes --json \
+      >"$reclaim_log" 2>&1
+    reclaim_status=$?
+    set -e
+    # Orca documents exit 4 as "there is no lock"; neither 0 (reclaimed) nor
+    # 4 leaves an active lock owner, so both are safe to retry normally.
+    if [ "$reclaim_status" -eq 0 ] || [ "$reclaim_status" -eq 4 ]; then
+      reclaimed=1
+      start_orca
+      continue
+    fi
+    if clear_recreated_vm_lock; then
+      reclaimed=1
+      start_orca
+      continue
+    fi
+    echo 'Orca refused to reclaim its persistent data lock; another Orca may still own it.' >&2
+    echo 'Wait five minutes after stopping the previous sandbox, then retry sbxr orca.' >&2
+    exit 1
+  fi
+  sleep 1
+done
+echo 'Orca did not print a pairing link; recent log follows:' >&2
+tail -n 20 "$log" 2>/dev/null \
+  | sed -E 's#(orca|https?)://[^[:space:]]+#<redacted-url>#g' >&2 || true
+exit 1
+"#;
 
 pub(crate) fn ensure_installed(context: &Context, sandbox_name: &str) -> Result<(), String> {
     let script = installation_script();
@@ -39,13 +114,15 @@ root=/opt/sbxr-orca/{VERSION}
 if [ -x "$root/squashfs-root/AppRun" ] \
   && [ -x /usr/local/bin/sbxr-orca-server ] \
   && command -v xvfb-run >/dev/null 2>&1 \
-  && command -v xauth >/dev/null 2>&1; then
+  && command -v xauth >/dev/null 2>&1 \
+  && compgen -G '/usr/lib/*/libnspr4.so' >/dev/null; then
   exit 0
 fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
   ca-certificates curl file jq xauth xvfb zlib1g-dev \
+  libnspr4 \
   libasound2t64 libgtk-3-0t64 libnotify4 libnss3 libsecret-1-0 \
   libxss1 libxtst6 xdg-utils
 rm -rf /var/lib/apt/lists/*
@@ -80,31 +157,10 @@ chmod 0755 /usr/local/bin/sbxr-orca-server
 }
 
 pub(crate) fn pairing_link(context: &Context, sandbox_name: &str) -> Result<String, String> {
-    let script = r#"set -euo pipefail
-state=/home/agent/.local/state/sbxr
-log="$state/orca-server.log"
-pidfile="$state/orca-server.pid"
-mkdir -p "$state"
-if [ -s "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
-  :
-else
-  rm -f "$log" "$pidfile"
-  nohup /usr/local/bin/sbxr-orca-server serve --port 6768 --pairing-address 127.0.0.1 >"$log" 2>&1 </dev/null &
-  printf '%s\n' "$!" > "$pidfile"
-fi
-for attempt in $(seq 1 60); do
-  link=$(grep -Eo '(orca|https?)://[^[:space:]]+' "$log" 2>/dev/null | tail -n1 || true)
-  if [ -n "$link" ]; then printf '%s\n' "$link"; exit 0; fi
-  sleep 1
-done
-echo 'Orca did not print a pairing link; recent log follows:' >&2
-tail -n 20 "$log" >&2 || true
-exit 1
-"#;
     let output = process::output_checked(
         sbx::exec_command(context.preserve_xdg_state)
             .arg(sandbox_name)
-            .args(["--", "bash", "-lc", script]),
+            .args(["--", "bash", "-lc", PAIRING_SCRIPT]),
         "starting the Orca remote server",
     )?;
     let link = String::from_utf8(output.stdout)
@@ -114,15 +170,19 @@ exit 1
     if link.is_empty() {
         return Err("Orca returned an empty pairing link".to_owned());
     }
-    let port = envfile::orca_host_port(sandbox_name);
+    let port = sbx::published_host_port(context.preserve_xdg_state, sandbox_name, 6768)?;
     rewrite_pairing_endpoint(&link, port)
 }
 
 fn rewrite_pairing_endpoint(link: &str, port: u16) -> Result<String, String> {
     let Some((prefix, encoded_tail)) = link.split_once("code=") else {
-        return Ok(link
+        let rewritten = link
             .replace("127.0.0.1:6768", &format!("127.0.0.1:{port}"))
-            .replace("127.0.0.1%3A6768", &format!("127.0.0.1%3A{port}")));
+            .replace("127.0.0.1%3A6768", &format!("127.0.0.1%3A{port}"));
+        if rewritten == link {
+            return Err("Orca pairing link does not target the expected guest listener".to_owned());
+        }
+        return Ok(rewritten);
     };
     let (encoded, suffix) = encoded_tail
         .split_once('&')
@@ -134,12 +194,9 @@ fn rewrite_pairing_endpoint(link: &str, port: u16) -> Result<String, String> {
         .get("endpoint")
         .and_then(Value::as_str)
         .ok_or_else(|| "Orca pairing payload has no string endpoint".to_owned())?;
-    let rewritten = endpoint.replace("127.0.0.1:6768", &format!("127.0.0.1:{port}"));
-    if rewritten == endpoint {
-        return Err(format!(
-            "Orca pairing endpoint does not target the expected guest listener: {endpoint}"
-        ));
-    }
+    let rewritten = rewrite_loopback_endpoint(endpoint, port).ok_or_else(|| {
+        "Orca pairing endpoint does not target the expected guest listener".to_owned()
+    })?;
     payload["endpoint"] = Value::String(rewritten);
     let serialized = serde_json::to_vec(&payload)
         .map_err(|error| format!("could not serialize Orca pairing payload: {error}"))?;
@@ -150,6 +207,18 @@ fn rewrite_pairing_endpoint(link: &str, port: u16) -> Result<String, String> {
         separator,
         suffix
     ))
+}
+
+fn rewrite_loopback_endpoint(endpoint: &str, port: u16) -> Option<String> {
+    for scheme in ["ws", "wss", "http", "https"] {
+        let prefix = format!("{scheme}://127.0.0.1:6768");
+        if let Some(suffix) = endpoint.strip_prefix(&prefix)
+            && (suffix.is_empty() || suffix.starts_with(['/', '?', '#']))
+        {
+            return Some(format!("{scheme}://127.0.0.1:{port}{suffix}"));
+        }
+    }
+    None
 }
 
 fn base64_url_decode(encoded: &str) -> Result<Vec<u8>, String> {
@@ -210,7 +279,8 @@ fn base64_url_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        base64_url_decode, base64_url_encode, installation_script, rewrite_pairing_endpoint,
+        base64_url_decode, base64_url_encode, installation_script, rewrite_loopback_endpoint,
+        rewrite_pairing_endpoint,
     };
     use serde_json::{Value, json};
 
@@ -231,6 +301,10 @@ mod tests {
 
         assert_eq!(decoded["endpoint"], "ws://127.0.0.1:45678");
         assert_eq!(decoded["deviceToken"], "not-a-real-token");
+        assert!(rewrite_pairing_endpoint("orca://pair?endpoint=example.com", 45678).is_err());
+        assert!(
+            rewrite_loopback_endpoint("ws://evil.example/?next=127.0.0.1:6768", 45678).is_none()
+        );
     }
 
     #[test]
@@ -243,11 +317,25 @@ mod tests {
     }
 
     #[test]
-    fn installation_requires_and_repairs_xauth_without_redownloading_orca() {
+    fn installation_repairs_headless_dependencies_without_redownloading_orca() {
         let script = installation_script();
 
         assert!(script.contains("command -v xauth"));
+        assert!(script.contains("/usr/lib/*/libnspr4.so"));
+        assert!(script.contains("libnspr4"));
         assert!(script.contains("curl file jq xauth xvfb"));
         assert!(script.contains("if [ ! -x \"$root/squashfs-root/AppRun\" ]; then"));
+    }
+
+    #[test]
+    fn pairing_uses_orcas_guarded_stale_lock_recovery() {
+        let script = super::PAIRING_SCRIPT;
+
+        assert!(script.contains("grep -q 'OrcadInstanceLockError'"));
+        assert!(script.contains("--reclaim-stale-lock --data-root \"$data_root\" --yes --json"));
+        assert!(script.contains("contains(\"different machine id\")"));
+        assert!(script.contains(".linuxStartTicks"));
+        assert!(script.contains("[ ! -L \"$lock\" ] && [ -f \"$lock\" ]"));
+        assert!(script.contains("Orca refused to reclaim"));
     }
 }

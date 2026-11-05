@@ -2,8 +2,8 @@ use crate::cli::{self, Action, Cli};
 use crate::environment::{Context, Project, RocksDbHost};
 use crate::profile::{self, WorkspaceMode};
 use crate::{
-    auth, diagnostics, envfile, github_proxy, host, orca, process, sandbox, sbx, sign, verify,
-    vscode,
+    auth, diagnostics, envfile, github_proxy, health, host, orca, process, sandbox, sbx, sign,
+    verify, vscode,
 };
 use std::env;
 use std::path::Path;
@@ -37,7 +37,10 @@ pub(crate) fn run() -> Result<i32, String> {
     }
 
     let rocksdb = RocksDbHost::resolve(cli.rocksdb.take())?;
-    let read_only = matches!(cli.action, Action::Inspect(_) | Action::Profile(_));
+    let read_only = matches!(
+        cli.action,
+        Action::Inspect(_) | Action::Profile(_) | Action::Diagnose(_)
+    );
     let context = if read_only {
         Context::discover_read_only()?
     } else {
@@ -52,7 +55,14 @@ pub(crate) fn run() -> Result<i32, String> {
             let inventory = sbx::list_json(context.preserve_xdg_state)?;
             let name = sandbox::sandbox_name(&project, &selected);
             if sbx::sandbox_state(&inventory.stdout, name)?.is_some() {
-                if let Err(error) = verify::run(&context, &project, cli.preset, &selected) {
+                if let Err(error) = verify::run(
+                    &context,
+                    &project,
+                    cli.preset,
+                    rocksdb.as_ref(),
+                    &selected,
+                    false,
+                ) {
                     println!("FAIL sandbox version/credential report: {error}");
                     healthy = false;
                 }
@@ -91,6 +101,9 @@ pub(crate) fn run() -> Result<i32, String> {
     };
     if let Some(report) = &mut report {
         report.event("profile", "validated", None)?;
+        if let Ok(info) = sbx::runtime_info(context.preserve_xdg_state) {
+            report.runtime(&info)?;
+        }
     }
     let result = (|| -> Result<i32, String> {
         if selected.github_proxy && action_ensures_sandbox(&cli.action) {
@@ -189,6 +202,11 @@ fn dispatch(
             sandbox::ensure_dev(context, project, preset, rocksdb, profile, false, force)?;
             let endpoint = sandbox::paseo_endpoint_for(context, name)?;
             println!("{endpoint}\npaste that URL into Paseo Desktop as a remote daemon");
+            if profile.paseo_relay {
+                println!(
+                    "Paseo relay is enabled for authenticated remote access; the SSH URL remains available locally."
+                );
+            }
         }
         Action::Orca(_) => {
             sandbox::ensure_dev(context, project, preset, rocksdb, profile, false, force)?;
@@ -202,8 +220,47 @@ fn dispatch(
             sandbox::ensure_dev(context, project, preset, rocksdb, profile, false, force)?;
             auth::show_status(context, name, preset)?;
         }
+        Action::AuthRenew(request) => {
+            match request.provider {
+                cli::AuthProvider::OpenAi if !preset.has_codex() => {
+                    return Err(format!(
+                        "OpenAI renewal is not used by the {} preset",
+                        preset.name()
+                    ));
+                }
+                cli::AuthProvider::Anthropic if !preset.has_claude() => {
+                    return Err(format!(
+                        "Anthropic renewal is not used by the {} preset",
+                        preset.name()
+                    ));
+                }
+                cli::AuthProvider::GitHub if !profile.github_proxy => {
+                    return Err(
+                        "GitHub renewal requires the host-proxied GitHub profile".to_owned()
+                    );
+                }
+                _ => {}
+            }
+            sandbox::ensure_dev(context, project, preset, rocksdb, profile, false, force)?;
+            verify::verify_credentials(context, name)?;
+            auth::renew(context, project, name, request.provider)?;
+            verify::verify_credentials(context, name)?;
+            verify::run(context, project, preset, rocksdb, profile, false)?;
+        }
         Action::Audit(_) => sandbox::audit(context, project, preset, rocksdb, profile, force)?,
-        Action::Verify(_) => verify::run(context, project, preset, profile)?,
+        Action::Verify(request) => {
+            verify::run(context, project, preset, rocksdb, profile, request.live)?
+        }
+        Action::Repair(_) => {
+            println!("==> reconciling sandbox integrations from trusted sources");
+            sandbox::ensure_dev(context, project, preset, rocksdb, profile, true, force)?;
+            verify::run(context, project, preset, rocksdb, profile, false)?;
+            println!("repaired: {name}");
+        }
+        Action::Diagnose(_) => {
+            diagnostics::summarize_latest(context)?;
+            health::Ledger::load(context, name, preset, profile)?.print();
+        }
         Action::Review(_) => {
             vscode::check_host()?;
             sandbox::ensure_review(context, project, rocksdb, force)?;
@@ -216,19 +273,24 @@ fn dispatch(
         Action::Profile(_) => profile::print(context, project, profile)?,
         Action::Name(_) => println!("{name}"),
         Action::Status(_) => {
-            return Ok(if show_selected_status(context, project, profile)? {
-                0
-            } else {
-                1
-            });
+            let exists = show_selected_status(context, project, profile)?;
+            let ledger = health::Ledger::load(context, name, preset, profile)?;
+            ledger.print();
+            if exists && ledger.needs_repair() {
+                println!("repair: sbxr repair {}", shell_quote_path(&project.path));
+            } else if exists && ledger.needs_verification() {
+                println!("verify: sbxr verify {}", shell_quote_path(&project.path));
+            }
+            return Ok(if exists { 0 } else { 1 });
         }
         Action::Stop(_) => {
             process::require("sbx")?;
-            vscode::close_for_stop(context, name, &project.path)?;
+            vscode::close_for_lifecycle(context, name, &project.path, "stop", "stopped")?;
             sbx::stop(context.preserve_xdg_state, name)?;
         }
         Action::Remove { force, .. } => {
             process::require("sbx")?;
+            vscode::close_for_lifecycle(context, name, &project.path, "rm", "removed")?;
             println!("Removing sandbox-local state for {name}; host project files remain.");
             sbx::require_minimum_version(context.preserve_xdg_state)?;
             let definition = envfile::materialize(
@@ -240,6 +302,7 @@ fn dispatch(
             )?;
             sbx::env_remove(context.preserve_xdg_state, definition.path(), force)?;
             definition.remove_host_state(&context.state_root)?;
+            health::remove(context, name)?;
         }
         Action::CommitPgpSign(_)
         | Action::Setup
@@ -324,14 +387,20 @@ fn action_ensures_sandbox(action: &Action) -> bool {
             | Action::Paseo(_)
             | Action::Orca(_)
             | Action::AuthStatus(_)
+            | Action::AuthRenew(_)
             | Action::Audit(_)
+            | Action::Repair(_)
             | Action::Isolated(_)
             | Action::Wizard(_)
     )
 }
 
 fn action_has_report(action: &Action) -> bool {
-    action_ensures_sandbox(action) || matches!(action, Action::Remove { .. } | Action::Review(_))
+    action_ensures_sandbox(action)
+        || matches!(
+            action,
+            Action::Remove { .. } | Action::Review(_) | Action::Verify(_)
+        )
 }
 
 fn action_label(action: &Action) -> &'static str {
@@ -346,7 +415,10 @@ fn action_label(action: &Action) -> &'static str {
         Action::Paseo(_) => "paseo",
         Action::Orca(_) => "orca",
         Action::AuthStatus(_) => "auth-status",
+        Action::AuthRenew(_) => "auth-renew",
         Action::Audit(_) => "audit",
+        Action::Verify(_) => "verify",
+        Action::Repair(_) => "repair",
         Action::Isolated(_) => "isolated",
         Action::Wizard(_) => "wizard",
         Action::Review(_) => "review",
