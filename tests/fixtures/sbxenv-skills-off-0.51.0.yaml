@@ -1,0 +1,8 @@
+schemaVersion: "1"
+name: "sbxr-capability-probe"
+agent: "codex"
+workspace:
+  path: "${{ env.projectDir }}"
+  clone: false
+sandboxOptions:
+  skills: off

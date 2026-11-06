@@ -17,7 +17,7 @@ over equivalent environment variables.
 | `SBXR_SYNC_AGENT_CONFIG` | `0` to disable | Trusted-host Codex, Claude, and Pi extension/plugin and configuration mirroring is enabled |
 | `SBXR_SYNC_VSCODE_EXTENSIONS` | `0` to disable | Host VS Code extension mirroring is enabled |
 | `SBXR_SYNC_PI_EXTENSIONS` | `0` or `1` | Unset/`1` mirrors raw Pi source extensions; `0` omits them |
-| `SBXR_SYNC_HOST_SHELL` | `0` to disable | Host Bash aliases and the `~/bin` utility directory are mirrored |
+| `SBXR_SYNC_HOST_SHELL` | `0` to disable | The profile-selected trusted host shell overlay is mirrored |
 | `SBXR_PRESERVE_XDG_STATE_HOME` | `1` to preserve | `XDG_STATE_HOME` is removed from child `sbx` and VS Code commands |
 
 Values other than the documented control value generally behave like the
@@ -41,7 +41,9 @@ SBXR_PRESET=rust-claude sbxr --preset rust-codex new .
 
 `SBXR_NAME` bypasses project-specific name generation. Reusing one override
 across unrelated projects can unintentionally select the same sandbox, so it
-is primarily a debugging and automation option:
+is primarily a debugging and automation option. It must be 1–128 ASCII
+letters, digits, dots, dashes, or underscores, beginning with a letter or
+digit; path separators and traversal components are rejected:
 
 ```bash
 SBXR_NAME=rust-experiment sbxr up .
@@ -95,6 +97,8 @@ generated environment contains paths and kit references but no OAuth tokens,
 private keys, or literal secrets. GitHub/GHCR declarations may contain the
 fixed absolute host command `/usr/bin/gh auth token`; Docker executes it on the
 host and exposes only its proxy sentinel, never the command output, to guests.
+See [CREDENTIAL_ARCHITECTURE.md](CREDENTIAL_ARCHITECTURE.md) for the complete
+credential data flow and its limits.
 
 ## Protected project profiles and direct options
 
@@ -105,6 +109,7 @@ variables. They can appear before or after the command:
 sbxr --wizard .
 sbxr --memory 8g --cpus 4 --browser new -y .
 sbxr --isolated --network restricted up -y .
+sbxr --paseo-relay up -y .
 sbxr --config /trusted/team-profile.json up -y .
 ```
 
@@ -112,11 +117,53 @@ sbxr --config /trusted/team-profile.json up -y .
 the wizard save a validated version-1 JSON file below
 `$SBXR_STATE_ROOT/profiles`. Allowed settings are `workspace`, `network`,
 `githubProxy: true`, `integrations.browser`, `integrations.orca`,
-`integrations.ghcr`, and `resources.memory/cpus/rootDisk/dockerDisk`. Unknown
-keys, secret-looking keys, malformed types, unsafe sizes, excessive CPU/memory,
-and unsafe disk budgets are rejected. External `--config` files are parsed
-with the same schema and copied into protected state; profiles must never
-contain credentials.
+`integrations.ghcr`, `integrations.paseoRelay`, and
+`resources.memory/cpus/rootDisk/dockerDisk`, plus `shell.profile`,
+`shell.program`, `shell.prompt`, `shell.promptFile`, `shell.aliasFiles`, and
+`shell.binDirs`. Unknown keys, secret-looking keys,
+malformed types, unsafe sizes, excessive CPU/memory, and unsafe disk budgets
+are rejected. External `--config` files are parsed with the same schema and
+copied into protected state; profiles must never contain credentials.
+
+The shell object defaults to:
+
+```json
+{
+  "profile": "familiar",
+  "program": "bash",
+  "prompt": "classic",
+  "promptFile": null,
+  "aliasFiles": [],
+  "binDirs": []
+}
+```
+
+`profile` accepts `familiar`, `minimal`, or `custom`; `program` accepts `bash`,
+`zsh`, or `fish`; and `prompt` accepts `classic`, `plain`, or `custom`.
+`promptFile` is required for a custom prompt. `aliasFiles` and `binDirs` are
+valid only with `profile: "custom"`; their direct CLI flags select that profile
+automatically. Every path is relative to the host home
+(`~/...` is accepted and normalized), must contain no traversal component, and
+retains that relative suffix below the sbxr-owned guest mirror
+`~/.local/share/sbxr/host-shell`. Alias and bin lists accept at most 32 unique
+entries each. These files are trusted executable inputs and must not contain
+secrets. The managed startup files `.bashrc`,
+`.zshrc`, and `.config/fish/config.fish` cannot be selected directly; use a
+dedicated alias or prompt file so sbxr can retain its integration hook.
+
+`paseoRelay` defaults to `false`. When enabled, sbxr atomically enables Paseo's
+authenticated relay in sandbox-local configuration and adds the
+sandbox-scoped `relay.paseo.sh:443` endpoint; it does not place relay
+credentials in the profile. Disabling it removes that endpoint rule. It is
+rejected with the `offline` network mode. Unlike creation-time VM resources,
+toggling it does not require sandbox recreation; `sbxr repair` or the next
+ensuring command reconciles it.
+
+`network` is also runtime-reconciled and does not change the environment
+contract. Switching among `development`, `restricted`, and `offline` adds the
+new sandbox-scoped deny rules before removing the prior sbxr-owned rules. Rule
+ownership is recorded as exact Docker rule IDs in protected host metadata;
+manual and host-global rules are never claimed or removed.
 
 `--root-disk` and `--docker-disk` are passed to Docker Sandboxes only for the
 environment lifecycle command. Memory and CPU limits are declared in the
@@ -171,16 +218,74 @@ The setting does not remove Pi package declarations from a mirrored
 `settings.json`; use `SBXR_SYNC_AGENT_CONFIG=0` to disable all agent capability
 and configuration mirroring.
 
-The alias definitions in the host `~/.bashrc`, the whole of `~/.bash_aliases`,
-and the `~/bin` utility directory are mirrored during the same bootstrap and
-wired into the sandbox's interactive shells. Disable that separately:
+The default `familiar` Bash profile extracts alias definitions from the host
+`~/.bashrc`, mirrors the whole of `~/.bash_aliases` and `~/bin`, and wires them
+into interactive shells. For Zsh it uses alias definitions from `~/.zshrc`
+plus `~/.zsh_aliases`; for Fish it uses alias definitions from
+`~/.config/fish/config.fish` plus
+`~/.config/fish/conf.d/aliases.fish`. Missing conventional files are simply
+omitted. `minimal` selects no conventional host files. `custom` uses only the
+explicit repeatable `--alias-file`, `--bin-dir`, and optional `--prompt-file`
+paths. The wizard configures the same fields. Known credential stores, their
+children, and parent selections that would contain them are rejected. The same
+check runs when the profile is validated and immediately before transfer.
+Selected top-level paths may be symlinks (as dotfile managers create for
+`~/.bash_aliases` or `~/bin`); they are mirrored by content, and both the
+selected name and its resolved target must clear the protected-store check.
+The resolved target of an explicit selection must also remain inside the
+canonical host home, so a link cannot route an external file or credential
+store into the mirror. A conventional alias file or `bin` directory discovered
+automatically by `familiar` is instead omitted with a warning when its target
+leaves the home; it never blocks an otherwise valid launch. Login and
+environment files (`.profile`, `.bash_profile`, `.zprofile`, `.zshenv`,
+`.env`, Fish `fish_variables`) are also refused. Nested symlinks are preserved,
+as relative links, only when they resolve inside the selected tree; escaping
+and broken links are skipped.
+Disable all host shell mirroring separately:
 
 ```bash
 SBXR_SYNC_HOST_SHELL=0 sbxr update .
 ```
 
-Mirrored host utilities are appended to `PATH`, so a sandbox-managed toolchain
-of the same name keeps priority. `~/bin/.git` is never copied.
+Selected files and directories are copied below one sbxr-owned guest root,
+`~/.local/share/sbxr/host-shell/<host-relative path>`, never onto the matching
+path in the sandbox home, so a selection such as `.local/bin` cannot replace
+sandbox-managed tools. Host paths that point into a mirrored selection
+(`/host/home/bin/x`, `~/bin/x`, `$HOME/bin/x`) are rewritten to the mirror;
+other absolute host-home paths map to `/home/agent`. Mirrored host utilities
+are appended to `PATH`, so a sandbox-managed toolchain of the same name keeps
+priority. Any `.git` directory below a mirrored shell tree is never copied.
+Each refresh rebuilds the whole mirror in a staging directory and swaps it in,
+which removes stale selections when changing to `minimal` or another profile.
+sbxr uses a source metadata fingerprint (type, size, mtime, and permission
+bits, plus the generated overlay itself) to detect host alias or utility
+changes on the next ensuring command. `sbxr update` forces a complete refresh.
+Fish familiar-mode extraction copies only top-level one-line `alias`
+statements; functions belong in a dedicated selected `.fish` file.
+
+## Local kit-composition cache
+
+Docker Sandboxes automatically assembles source-form Kits v3 into
+content-addressed images in its private local runtime during normal sandbox
+creation. The committed kit specifications are sbxr's deterministic generic
+base recipe; personal configuration is applied later and is not part of that
+cache.
+
+Run `sbxr setup --prebuild` to warm the default preset's composition before
+creating the first project. The disposable warm-up sandbox has no workspace or
+host-personalization inputs and is removed afterward. Nothing is exported or
+pushed to a registry, and no host Docker Engine is required. The warm-up uses
+the default Bash profile; selecting Zsh or Fish adds that shell's small kit
+layer on first use. A later prebuild invocation removes abandoned
+`sbxr-prebuild-*` sandboxes whose owning process no longer exists.
+
+The cache reuses kit assembly only. A real project sandbox still creates fresh
+persistent volumes and runs the kits' idempotent install hooks to initialize
+and verify them. sbxr does not save the warm-up sandbox as a template because
+Docker templates omit mounted filesystems, including sbxr's volume-backed Rust
+toolchain and Pi state. Docker manages the composition image cache; the broad,
+destructive `sbx reset` command clears it together with all sandbox state and
+authentication.
 
 ## `XDG_STATE_HOME` compatibility
 

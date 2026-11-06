@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the release Rust toolchain
+        shell: bash
+        run: |
+          rust_version=$(tr -d '[:space:]' < RUST_RELEASE_VERSION)
+          rustup toolchain install "$rust_version" --profile minimal --component clippy,rustfmt
+          rustup override set "$rust_version"
+      - name: Verify release metadata
+        run: ./scripts/verify-release-metadata.sh
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test from vendored dependencies
+        run: cargo test --all-targets --offline --frozen
+      - name: Lint
+        run: cargo clippy --all-targets --all-features --offline --frozen -- -D warnings
+      - name: Build the optimized binary
+        run: cargo build --release --offline --frozen
+      - name: Smoke-test the optimized binary
+        shell: bash
+        run: |
+          test "$(target/release/sbxr --version)" = "sbxr $(tr -d '[:space:]' < VERSION)"
+          target/release/sbxr help >/dev/null
+
+  msrv:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the minimum supported Rust toolchain
+        run: rustup toolchain install 1.85.0 --profile minimal
+      - name: Check the declared MSRV
+        run: cargo +1.85.0 check --all-targets --offline --frozen

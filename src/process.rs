@@ -5,6 +5,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::OnceLock;
+use std::thread;
+use std::time::{Duration, Instant};
 
 static SSH_AGENT_SOCKET: OnceLock<Option<OsString>> = OnceLock::new();
 
@@ -159,6 +161,44 @@ pub fn output_checked(command: &mut Command, description: &str) -> Result<Output
     let output = command
         .output()
         .map_err(|error| format!("could not run {description}: {error}"))?;
+    checked_output(output, description)
+}
+
+pub fn output_checked_timeout(
+    command: &mut Command,
+    description: &str,
+    timeout: Duration,
+) -> Result<Output, String> {
+    let mut child = command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not run {description}: {error}"))?;
+    let started = Instant::now();
+    loop {
+        if child
+            .try_wait()
+            .map_err(|error| format!("could not wait for {description}: {error}"))?
+            .is_some()
+        {
+            let output = child
+                .wait_with_output()
+                .map_err(|error| format!("could not collect {description} output: {error}"))?;
+            return checked_output(output, description);
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "{description} timed out after {} seconds",
+                timeout.as_secs()
+            ));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn checked_output(output: Output, description: &str) -> Result<Output, String> {
     if output.status.success() {
         Ok(output)
     } else {
@@ -168,5 +208,33 @@ pub fn output_checked(command: &mut Command, description: &str) -> Result<Output
         } else {
             Err(format!("{description} failed: {stderr}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_output_terminates_a_stuck_command() {
+        let error = output_checked_timeout(
+            Command::new("sh").args(["-c", "sleep 5"]),
+            "test command",
+            Duration::from_millis(50),
+        )
+        .unwrap_err();
+        assert!(error.contains("test command timed out"), "{error}");
+    }
+
+    #[test]
+    fn bounded_output_preserves_successful_output() {
+        let output = output_checked_timeout(
+            Command::new("rustc").arg("--version"),
+            "querying rustc",
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).starts_with("rustc "));
     }
 }

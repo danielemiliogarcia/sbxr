@@ -1,0 +1,64 @@
+# syntax=docker/sandbox-kit:3
+schemaVersion: "3"
+kind: mixin
+version: "1.0.0"
+displayName: Fish login shell
+description: Installs Fish and selects it as the agent login shell with sbxr prompt and host-overlay hooks.
+sourceUrl: https://github.com/danielemiliogarcia/sbxr
+
+capabilities:
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      install:
+        allow:
+          - deb.debian.org
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        - command: |
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+            # The deliberately minimal agent workload omits records that the
+            # Debian fish/man-db maintainer scripts normally inherit from a
+            # full base image. Seed only those OS-level prerequisites.
+            if ! getent group man >/dev/null 2>&1; then
+              groupadd --system man
+            fi
+            if ! getent passwd man >/dev/null 2>&1; then
+              useradd --system --gid man --home-dir /var/cache/man --shell /usr/sbin/nologin man
+            fi
+            install -d -o man -g man /var/cache/man
+            if [ ! -e /etc/shells ]; then
+              printf '%s\n' /bin/sh /bin/bash > /etc/shells
+            fi
+            rm -f /etc/shells.tmp
+            apt-get update
+            apt-get install -y --no-install-recommends fish
+            rm -rf /var/lib/apt/lists/*
+            usermod -s /usr/bin/fish agent
+            mkdir -p /home/agent/.config/fish/conf.d /home/agent/.config/sbxr
+            cat > /home/agent/.config/fish/conf.d/10-sbxr-prompt.fish <<'SBXR_PROMPT'
+            function fish_prompt
+              set -l branch (command git symbolic-ref --quiet --short HEAD 2>/dev/null; or command git rev-parse --short HEAD 2>/dev/null)
+              set_color green
+              printf '%s@%s' $USER (prompt_hostname)
+              set_color normal
+              printf ':'
+              set_color blue
+              printf '%s' (prompt_pwd)
+              if test -n "$branch"
+                set_color yellow
+                printf ' (%s)' $branch
+              end
+              set_color normal
+              printf '> '
+            end
+            SBXR_PROMPT
+            cat > /home/agent/.config/fish/conf.d/20-sbxr-host-shell.fish <<'SBXR_HOST'
+            if test -f "$HOME/.config/sbxr/host-shell-runtime.fish"
+              source "$HOME/.config/sbxr/host-shell-runtime.fish"
+            end
+            SBXR_HOST
+            chown -R agent:agent /home/agent/.config/fish /home/agent/.config/sbxr
+          user: "0"
+          description: Install and configure the Fish login shell

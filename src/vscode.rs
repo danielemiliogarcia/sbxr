@@ -14,6 +14,8 @@ const REMOTE_SERVER_ROOT: &str = "/home/agent/.vscode-server/cli/servers";
 const REMOTE_MACHINE_SETTINGS: &str = "/home/agent/.vscode-server/data/Machine/settings.json";
 const REMOTE_MACHINE_SETTINGS_DIRECTORY: &str = "/home/agent/.vscode-server/data/Machine";
 const REMOTE_WINDOW_CLOSE_WAIT: Duration = Duration::from_secs(30);
+const VSCODE_STATUS_WAIT: Duration = Duration::from_secs(5);
+const EXTENSION_INSTALL_BATCH_SIZE: usize = 4;
 
 pub(crate) fn check_host() -> Result<(), String> {
     process::require("code")?;
@@ -70,20 +72,24 @@ pub(crate) fn open(
     Ok(true)
 }
 
-pub(crate) fn close_for_stop(
+pub(crate) fn close_for_lifecycle(
     context: &Context,
     sandbox_name: &str,
     project: &Path,
+    command: &str,
+    outcome: &str,
 ) -> Result<(), String> {
     if !process::command_exists("code") || !remote_window_open(context, sandbox_name)? {
         return Ok(());
     }
     println!("==> asking VS Code to save and close {sandbox_name}.sbx");
-    if !close_remote_windows_with_window_manager(context, sandbox_name)? {
+    let closed_with_window_manager =
+        close_remote_windows_with_window_manager(context, sandbox_name)?;
+    if !closed_with_window_manager {
         let (all_windows, matching_windows) = vscode_window_counts(context, sandbox_name)?;
         if all_windows != matching_windows || matching_windows != 1 {
             return Err(format!(
-                "could not address the {sandbox_name}.sbx VS Code window without risking another window. Close that Remote-SSH window manually, then retry `sbxr stop`. On Linux/X11, install `wmctrl` to enable targeted automatic closing. The sandbox was not stopped."
+                "could not address the {sandbox_name}.sbx VS Code window without risking another window. Close that Remote-SSH window manually, then retry `sbxr {command}`. On Linux/X11, install `wmctrl` to enable targeted automatic closing. The sandbox was not {outcome}."
             ));
         }
         close_remote_window_with_code(context, sandbox_name, project)?;
@@ -91,17 +97,36 @@ pub(crate) fn close_for_stop(
 
     let started = Instant::now();
     loop {
-        if !remote_window_open(context, sandbox_name)? {
+        let open = if closed_with_window_manager {
+            remote_window_open_with_window_manager(sandbox_name)?
+        } else {
+            remote_window_open(context, sandbox_name)?
+        };
+        if !open {
             thread::sleep(Duration::from_millis(500));
             return Ok(());
         }
         if started.elapsed() >= REMOTE_WINDOW_CLOSE_WAIT {
             return Err(format!(
-                "VS Code did not close the {sandbox_name}.sbx window. Resolve any unsaved-file prompt or close that window manually, then retry `sbxr stop`. The sandbox was not stopped so terminal state is not discarded."
+                "VS Code did not close the {sandbox_name}.sbx window. Resolve any unsaved-file prompt or close that window manually, then retry `sbxr {command}`. The sandbox was not {outcome} so terminal state is not discarded."
             ));
         }
         thread::sleep(Duration::from_millis(500));
     }
+}
+
+#[cfg(target_os = "linux")]
+fn remote_window_open_with_window_manager(sandbox_name: &str) -> Result<bool, String> {
+    let output = process::output_checked(
+        Command::new("wmctrl").arg("-l"),
+        "checking whether the sandbox VS Code window closed",
+    )?;
+    Ok(!remote_window_ids(&String::from_utf8_lossy(&output.stdout), sandbox_name).is_empty())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn remote_window_open_with_window_manager(_sandbox_name: &str) -> Result<bool, String> {
+    Ok(false)
 }
 
 #[cfg(target_os = "linux")]
@@ -182,9 +207,10 @@ fn remote_window_open(context: &Context, sandbox_name: &str) -> Result<bool, Str
 }
 
 fn vscode_window_counts(context: &Context, sandbox_name: &str) -> Result<(usize, usize), String> {
-    let output = process::output_checked(
+    let output = process::output_checked_timeout(
         process::code_command(context.preserve_xdg_state).arg("--status"),
         "inspecting VS Code windows before stopping the sandbox",
+        VSCODE_STATUS_WAIT,
     )?;
     Ok(status_window_counts(
         &String::from_utf8_lossy(&output.stdout),
@@ -302,7 +328,18 @@ fn sync_extensions(context: &Context, sandbox_name: &str, server_cli: &str) -> R
         "==> installing {} missing host VS Code extension(s) on {sandbox_name}.sbx",
         missing.len()
     );
-    install_extensions(context, sandbox_name, server_cli, &missing);
+    let batches = extension_install_batches(&missing);
+    for (index, batch) in batches.iter().enumerate() {
+        if batches.len() > 1 {
+            println!(
+                "  extension batch {}/{} ({} item(s))",
+                index + 1,
+                batches.len(),
+                batch.len()
+            );
+        }
+        install_extensions(context, sandbox_name, server_cli, batch);
+    }
 
     let remote = remote_extension_listing(context, sandbox_name, server_cli)?;
     let retry = missing_extension_specs(&missing, &remote);
@@ -415,6 +452,10 @@ fn install_extensions(
     }
 }
 
+fn extension_install_batches<'a>(extensions: &'a [&'a str]) -> Vec<&'a [&'a str]> {
+    extensions.chunks(EXTENSION_INSTALL_BATCH_SIZE).collect()
+}
+
 fn mirrored_extension_specs(listing: &str) -> Vec<&str> {
     listing
         .lines()
@@ -525,5 +566,14 @@ mod tests {
             missing_extension_specs(&wanted, installed),
             vec!["vadimcn.vscode-lldb@1.0.0", "eamodio.gitlens@2.0.0"]
         );
+    }
+
+    #[test]
+    fn bounds_remote_extension_install_batches() {
+        let extensions = ["one", "two", "three", "four", "five", "six", "seven"];
+        let batches = extension_install_batches(&extensions);
+
+        assert_eq!(batches, [&extensions[..4], &extensions[4..]]);
+        assert!(batches.iter().all(|batch| batch.len() <= 4));
     }
 }

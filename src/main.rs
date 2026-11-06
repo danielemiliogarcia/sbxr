@@ -8,6 +8,7 @@ mod envfile;
 mod environment;
 mod git;
 mod github_proxy;
+mod health;
 mod host;
 mod node_tools;
 mod orca;

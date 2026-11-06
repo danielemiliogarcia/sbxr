@@ -3,7 +3,9 @@ use crate::environment::{Context, RocksDbHost};
 use crate::{embedded, envfile, process, sbx};
 use std::fs;
 use std::io::{self, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) fn setup(preset: Preset, preserve_xdg_state: bool) -> Result<(), String> {
     println!("sbxr setup: configuring missing interactive host prerequisites");
@@ -184,6 +186,135 @@ pub(crate) fn setup(preset: Preset, preserve_xdg_state: bool) -> Result<(), Stri
     }
 }
 
+/// Warms Docker Sandboxes' native content-addressed Kits v3 composition cache
+/// from the repository's pinned default composition. The disposable sandbox
+/// has no workspace and receives no host personalization; personal overlays
+/// are still applied only by `sandbox::ensure_dev` after a real sandbox is
+/// created. This is deliberately not a saved sandbox template: sbx templates
+/// omit the volume-backed Rust toolchain and other persistent kit state.
+pub(crate) fn prebuild(context: &Context, preset: Preset) -> Result<(), String> {
+    process::require("sbx")?;
+    sbx::require_minimum_version(context.preserve_xdg_state)?;
+    cleanup_stale_prebuilds(context.preserve_xdg_state)?;
+    let profile = crate::profile::Profile::default();
+    let kits =
+        envfile::selected_local_kits(context, envfile::Kind::Development(preset), false, &profile);
+    let sequence = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("host clock is before the Unix epoch: {error}"))?
+        .as_nanos();
+    let name = format!("sbxr-prebuild-{}-{sequence:x}", std::process::id());
+    let arguments = prebuild_arguments(preset, &name, &kits);
+    println!(
+        "==> warming the local content-addressed sbxr kit-composition cache (no workspace or personal files)"
+    );
+    let result = process::run_checked(
+        sbx::command(context.preserve_xdg_state).args(&arguments),
+        "prebuilding the default Kits v3 composition",
+    );
+    let cleanup = process::run_checked(
+        sbx::command(context.preserve_xdg_state).args(["rm", "--force", &name]),
+        "removing the disposable cache-warm sandbox",
+    );
+    result?;
+    cleanup?;
+    println!(
+        "ok   local kit-composition cache warmed; Docker reuses it during matching sandbox creation"
+    );
+    Ok(())
+}
+
+fn cleanup_stale_prebuilds(preserve_xdg_state: bool) -> Result<(), String> {
+    let output = sbx::list_json(preserve_xdg_state)?;
+    for name in prebuild_sandbox_names(&output.stdout)? {
+        if prebuild_owner_running(&name) {
+            continue;
+        }
+        println!("==> removing stale cache-warm sandbox {name}");
+        process::run_checked(
+            sbx::command(preserve_xdg_state).args(["rm", "--force", &name]),
+            "removing a stale cache-warm sandbox",
+        )?;
+    }
+    Ok(())
+}
+
+fn prebuild_sandbox_names(bytes: &[u8]) -> Result<Vec<String>, String> {
+    let document: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("could not parse Docker sandbox inventory: {error}"))?;
+    let sandboxes = document.as_array().or_else(|| {
+        document
+            .get("sandboxes")
+            .and_then(serde_json::Value::as_array)
+    });
+    let sandboxes = sandboxes.ok_or("Docker sandbox inventory has no array of sandboxes")?;
+    Ok(sandboxes
+        .iter()
+        .filter_map(|sandbox| sandbox.get("name").and_then(serde_json::Value::as_str))
+        .filter(|name| name.starts_with("sbxr-prebuild-"))
+        .map(str::to_owned)
+        .collect())
+}
+
+/// A cache-warm sandbox is owned by a live sbxr process when the PID embedded
+/// in its name is running and is an sbxr binary. `ps` works on both Linux and
+/// macOS (no `/proc` there), and the command-name check stops a reused PID from
+/// protecting a stale sandbox forever.
+fn prebuild_owner_running(name: &str) -> bool {
+    let Some(pid) = name
+        .strip_prefix("sbxr-prebuild-")
+        .and_then(|tail| tail.split('-').next())
+        .and_then(|pid| pid.parse::<u32>().ok())
+    else {
+        return false;
+    };
+    match Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(output) => {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|command| command.starts_with("sbxr"))
+        }
+        Err(_) => Path::new("/proc").join(pid.to_string()).exists(),
+    }
+}
+
+fn prebuild_arguments(preset: Preset, name: &str, kits: &[std::path::PathBuf]) -> Vec<String> {
+    let workload = match preset {
+        Preset::Claude => envfile::CLAUDE_WORKLOAD,
+        Preset::Codex | Preset::MultiAgent => envfile::CODEX_WORKLOAD,
+    };
+    let mut arguments = vec![
+        "create".to_owned(),
+        workload.to_owned(),
+        "--name".to_owned(),
+        name.to_owned(),
+        "--pull".to_owned(),
+        "missing".to_owned(),
+        "--no-progress".to_owned(),
+        "--skills".to_owned(),
+        "off".to_owned(),
+        "--static-mcp".to_owned(),
+        "none".to_owned(),
+    ];
+    if preset == Preset::MultiAgent {
+        arguments.push("--kit".to_owned());
+        arguments.push(envfile::CLAUDE_MIXIN.to_owned());
+    }
+    for kit in kits {
+        arguments.push("--kit".to_owned());
+        arguments.push(kit.to_string_lossy().into_owned());
+    }
+    arguments
+}
+
 fn openai_oauth_configured(preserve_xdg_state: bool) -> Result<bool, String> {
     oauth_configured(preserve_xdg_state, "openai")
 }
@@ -349,10 +480,34 @@ pub(crate) fn doctor(context: &Context, preset: Preset, rocksdb: Option<&RocksDb
     }
 
     if process::command_exists("sbx") {
-        let sbx_version = match sbx::require_minimum_version(context.preserve_xdg_state) {
-            Ok(version) => {
-                println!("ok   Docker Sandboxes {version} (minimum 0.51.0 for Kits v3)");
-                Some(version)
+        let sbx_version = match sbx::runtime_info(context.preserve_xdg_state) {
+            Ok(info) if sbx::validate_minimum_versions(&info).is_ok() => {
+                println!(
+                    "ok   Docker Sandboxes client {} · server {} · API {} (minimum 0.51.0 for Kits v3)",
+                    info.client, info.server, info.api_version
+                );
+                if info.server_state != "running" {
+                    println!(
+                        "WARN Docker Sandboxes server is {}; start it with `sbx daemon start --detach` before creating or using a sandbox",
+                        info.server_state
+                    );
+                    None
+                } else {
+                    match sbx::require_minimum_version(context.preserve_xdg_state) {
+                        Ok(version) => Some(version),
+                        Err(error) => {
+                            println!("FAIL {error}");
+                            healthy = false;
+                            None
+                        }
+                    }
+                }
+            }
+            Ok(info) => {
+                let error = sbx::validate_minimum_versions(&info).unwrap_err();
+                println!("FAIL {error}");
+                healthy = false;
+                None
             }
             Err(error) => {
                 println!("FAIL {error}");
@@ -474,13 +629,14 @@ fn print_docker_diagnostics(json: &[u8]) -> Result<bool, String> {
             }
         };
         println!("{label} Docker: {name} — {message}");
-        if status == "fail"
-            && let Some(hint) = check
+        if status == "fail" {
+            if let Some(hint) = check
                 .get("hint")
                 .and_then(serde_json::Value::as_str)
                 .filter(|hint| !hint.is_empty())
-        {
-            println!("     {hint}");
+            {
+                println!("     {hint}");
+            }
         }
     }
     Ok(healthy)
@@ -499,5 +655,45 @@ mod tests {
           ]
         }"#;
         assert!(!print_docker_diagnostics(json).unwrap());
+    }
+
+    #[test]
+    fn prebuild_recipe_is_workspace_free_and_uses_pinned_kits() {
+        let kits = vec![
+            std::path::PathBuf::from("/trusted/kits/rust"),
+            std::path::PathBuf::from("/trusted/kits/node-runtime"),
+        ];
+        let arguments = prebuild_arguments(Preset::MultiAgent, "sbxr-prebuild-test", &kits);
+        assert_eq!(arguments[0], "create");
+        assert_eq!(arguments[1], envfile::CODEX_WORKLOAD);
+        assert!(arguments.iter().any(|value| value == envfile::CLAUDE_MIXIN));
+        assert!(arguments.iter().any(|value| value == "/trusted/kits/rust"));
+        assert!(arguments.windows(2).any(|pair| pair == ["--skills", "off"]));
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| pair == ["--static-mcp", "none"])
+        );
+        assert!(!arguments.iter().any(|value| value == "."));
+        assert!(!arguments.iter().any(|value| value.contains("workspace")));
+    }
+
+    #[test]
+    fn selects_only_launcher_owned_prebuild_sandboxes() {
+        let inventory = br#"[
+          {"name":"sbxr-prebuild-999999-abc","status":"running"},
+          {"name":"rust-multi-project","status":"running"}
+        ]"#;
+        assert_eq!(
+            prebuild_sandbox_names(inventory).unwrap(),
+            ["sbxr-prebuild-999999-abc"]
+        );
+        assert!(!prebuild_owner_running("sbxr-prebuild-999999-abc"));
+        // The test binary is `sbxr-<hash>`, so this process counts as a live owner.
+        assert!(prebuild_owner_running(&format!(
+            "sbxr-prebuild-{}-abc",
+            std::process::id()
+        )));
+        assert!(!prebuild_owner_running("not-a-prebuild"));
     }
 }

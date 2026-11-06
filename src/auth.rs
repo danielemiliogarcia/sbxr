@@ -1,6 +1,7 @@
-use crate::cli::Preset;
+use crate::cli::{AuthProvider, Preset};
 use crate::environment::{Context, Project, RocksDbHost};
-use crate::sbx;
+use crate::{process, sandbox, sbx};
+use std::process::Command;
 
 const ANTHROPIC_PROXY_PROBE: &str = r#"
 set -eu
@@ -88,6 +89,40 @@ pub(crate) fn show_status(
             ])
             .status();
     }
+    Ok(())
+}
+
+pub(crate) fn renew(
+    context: &Context,
+    project: &Project,
+    sandbox_name: &str,
+    provider: AuthProvider,
+) -> Result<(), String> {
+    println!(
+        "==> renewing {} authentication through its supported host-proxy workflow",
+        provider.name()
+    );
+    match provider {
+        AuthProvider::OpenAi => process::run_checked(
+            sbx::command(context.preserve_xdg_state)
+                .args(["secret", "set", "openai", "--oauth", "--force"]),
+            "renewing Docker host-managed OpenAI OAuth",
+        )?,
+        AuthProvider::Anthropic => {
+            println!(
+                "Complete Claude's interactive login. Docker must retain the reusable OAuth credential behind the host proxy."
+            );
+            sandbox::run_remote(context, project, sandbox_name, &["claude", "auth", "login"])?;
+        }
+        AuthProvider::GitHub => {
+            process::require("gh")?;
+            process::run_checked(
+                Command::new("gh").args(["auth", "login", "--hostname", "github.com", "--web"]),
+                "renewing host GitHub authentication",
+            )?;
+        }
+    }
+    println!("==> authentication flow completed; auditing the sandbox before reuse");
     Ok(())
 }
 

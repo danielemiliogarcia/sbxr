@@ -1,0 +1,34 @@
+{
+  "rules": [
+    {
+      "id": "global-relay",
+      "scope": "global",
+      "applies_to": "all",
+      "resource_type": "network",
+      "decision": "allow",
+      "resources": ["relay.paseo.sh:443"],
+      "status": "active",
+      "editable": true
+    },
+    {
+      "id": "other-sandbox-relay",
+      "scope": "sandbox:other",
+      "sandbox_id": "other",
+      "resource_type": "network",
+      "decision": "allow",
+      "resources": ["relay.paseo.sh:443"],
+      "status": "active",
+      "editable": true
+    },
+    {
+      "id": "selected-sandbox-relay",
+      "scope": "sandbox:rust-multi-test",
+      "sandbox_id": "rust-multi-test",
+      "resource_type": "network",
+      "decision": "allow",
+      "resources": ["relay.paseo.sh:443", "unrelated.example:443"],
+      "status": "active",
+      "editable": true
+    }
+  ]
+}

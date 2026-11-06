@@ -1,6 +1,221 @@
 # Changelog
 
-## Unreleased
+## [0.3.4] - 2026-11-06
+
+### Added
+
+- Added a tag-gated native release matrix for Linux x86-64/ARM64,
+  Apple-silicon macOS, and Windows x86-64. Release builds use the exact pinned
+  current-stable Rust compiler with the committed vendored dependency tree,
+  smoke-test each native binary and its installer, publish SHA-256 checksums,
+  and attach GitHub build-provenance attestations. Verified POSIX and
+  PowerShell installers plus documented manual archive installation let users
+  run sbxr without installing Rust; source builds remain available and CI
+  separately enforces the Rust 1.85 MSRV.
+- Added first-class Bash, Zsh, and Fish login-shell profiles. The existing
+  familiar Bash experience remains the default; protected profiles, direct
+  flags, and the wizard can select `familiar`, `minimal`, or `custom`
+  mirroring plus Bash, Zsh, or Fish. Explicit alias files and executable
+  directories are custom-profile inputs, while prompt choices can be classic,
+  plain, or trusted custom files.
+- Added `sbxr setup --prebuild` to warm Docker Sandboxes' native,
+  content-addressed Kits v3 composition cache from sbxr's pinned default
+  composition without mounting a workspace or applying personal host files.
+  Ordinary sandbox creation continues to build and reuse the same cache
+  automatically, so prebuilding is optional.
+- Added a protected, resumable integration-health ledger. `sbxr status` shows
+  pending, verified, skipped, and needs-attention stages; `sbxr repair`
+  idempotently reconciles integrations and verifies the result.
+- Added `sbxr diagnose` to summarize the newest privacy-preserving lifecycle
+  report together with project health, and enriched reports with sanitized
+  runtime client/server/API metadata and failure categories.
+- Added `sbxr auth renew openai|anthropic|github` using each integration's
+  supported host-proxy workflow, with credential audits before and after the
+  renewal and a verification pass before reuse.
+- Added opt-in `sbxr verify --live` model requests for Codex, Claude, and Pi.
+  Raw provider output is suppressed and the guest credential audit is repeated
+  after the requests.
+- Added an optional authenticated Paseo relay profile setting and wizard
+  choice. The default remains relay-off; enabling it atomically updates guest
+  configuration and adds only the sandbox-scoped relay endpoint.
+
+### Changed
+
+- Pinned the default sandbox toolchain to Rust 1.99.1 while retaining automatic
+  discovery, installation, component reconciliation, and verification for
+  nested `rust-toolchain.toml` and `rust-toolchain` manifests.
+- Kept the official-workload-plus-local-Kits architecture: personal shell and
+  agent customization remains a post-creation overlay and is never captured in
+  the local composition cache or published as a personalized registry image.
+- Docker compatibility is now an explicit client/server boundary: sbxr parses
+  the required `sbx version --json` fields and probes every CLI capability it
+  relies on before lifecycle work. Committed 0.51 fixtures guard the schemas.
+- Orca now uses a Docker-allocated ephemeral host port, discovers the actual
+  mapping from structured output, and accepts it only when bound to loopback.
+- `sbxr review` explicitly disables Docker's shared host skills mount in
+  addition to its existing clone-mode, no-OAuth, no-SSH, no-host-mirror rules.
+- The normal `sbxr new -y` path, comfortable defaults, shared workspace, and
+  SSH-agent forwarding remain unchanged.
+
+### Upgrade notes
+
+- Existing development sandboxes require recreation for the Rust 1.99.1 and
+  host-shell kit revisions. Selecting Zsh or Fish also changes the kit
+  composition and therefore requires recreation; changing alias files,
+  executable directories, prompt style, or shell mirroring profile is
+  reconciled in place by the next ensuring command or `sbxr update`.
+- Existing Orca-enabled sandboxes must be recreated because their environment
+  contract now requests a Docker-allocated loopback port instead of a fixed
+  host port. Existing review sandboxes must also be recreated because the
+  contract now explicitly disables shared host skills. Docker Sandboxes 0.51
+  reallocates the ephemeral port across a normal stop/start too, so rerun
+  `sbxr orca` after a restart or recreation and update the Orca Desktop pairing
+  entry.
+- Existing development sandboxes also require a one-time recreation because
+  the profile fingerprint now correctly excludes runtime network policy. After
+  that migration, changing `development`, `restricted`, or `offline` no longer
+  recreates the VM.
+
+### Security
+
+- Custom shell files must be explicitly selected below the trusted host home.
+  Their paths are validated against traversal and overlap with known
+  credential stores, including SSH/GPG/cloud/agent homes, `.npmrc`,
+  `.pypirc`, Cargo registry credentials, `.vault-token`, password managers,
+  browser profiles across supported host platforms, login/environment files,
+  and Fish universal variables. The check is repeated on each selection's
+  resolved target, which must remain inside the canonical host home, and is
+  case-insensitive, so symlinks cannot bypass it; escaping nested symlinks are
+  skipped rather than followed.
+  Profiles remain nonsecret, and neither shell personalization nor credentials
+  are inputs to the local composition cache. Mirrored shell files are executable
+  trusted-host inputs.
+- Strengthened the guest credential audit to require exact Codex and Pi
+  sentinel schemas, inspect supported custom credential homes, fail closed on
+  malformed JSON, and reject credential stores with unsafe types, owners,
+  permissions, or symlinks. Findings contain locations only, never values.
+- Health records and their details use protected atomic host state and a
+  constrained redacted schema. Live provider verification is never implicit.
+- Added a consolidated credential-architecture guide covering Docker's host
+  proxy, guest sentinels, GitHub/GHCR host commands, SSH-agent forwarding,
+  host-only OpenPGP signing, workspace modes, unsupported secrets, renewal,
+  auditing, and verification commands.
+- Network-profile rule ownership now lives in protected host metadata as exact
+  Docker rule IDs. Guest code cannot forge an ownership marker, and sbxr never
+  removes a manual or host-global policy rule while changing profiles.
+- The credential audit now rejects malformed Docker auth entries, guest Docker
+  credential helpers, and qualified plural fields such as `authTokens` and
+  `clientSecrets`. Protected profile reads reject unsafe files and sandbox-name
+  overrides cannot traverse outside authoritative state.
+
+### Fixed
+
+- Restored the declared Rust 1.85 source-build compatibility by replacing five
+  nonessential newer let-chain expressions. CI now compiles all targets at the
+  declared MSRV so future compatibility drift fails before release.
+- Mirrored host shell files now live under one launcher-owned guest root,
+  `~/.local/share/sbxr/host-shell`, instead of at their host-relative paths in
+  `/home/agent`. Selecting a path such as `.cargo/bin` or `.local/bin` can no
+  longer overwrite or delete sandbox-managed toolchains or agent binaries, and
+  switching to `minimal` removes every previously mirrored alias and
+  executable directory. Each refresh is serialized per sandbox, uses a unique
+  staging directory, and restores the prior mirror if installation fails.
+  Host paths inside mirrored files and
+  extracted aliases (`/host/home/bin/x`, `~/bin/x`, `$HOME/bin/x`) are
+  rewritten to the mirror, including quoted `"$HOME"/bin/x`. Host source
+  fingerprints (now including permission bits and the generated overlay) make
+  ordinary host edits, `chmod +x`, and launcher overlay changes refresh on the
+  next ensuring command.
+- Familiar shell profiles no longer fail when `~/.bash_aliases`, `~/bin`, or
+  their Zsh/Fish equivalents are symlinks managed by stow, chezmoi, or a
+  dotfiles repository; in-home selections are mirrored by content. A
+  conventional path resolving outside the home (for example into the Nix
+  store or a separate data volume) is skipped with a warning instead of
+  blocking every launch, while an explicit external selection remains a hard
+  error. A dangling link inside a mirrored directory is skipped instead of
+  blocking every launch.
+- Concurrent shell reconciliation now treats a freshly created empty lock as
+  initialization in progress. It retries during a bounded grace period and
+  later reclaims an abandoned empty lock, while malformed nonempty locks remain
+  fail-closed.
+- In-tree symlinks in mirrored shell directories are emitted as relative links,
+  so deep targets no longer exceed ustar's 100-byte link field and links stay
+  valid when the host home is itself reached through a symlink.
+- Home-relative shell paths are normalized (`bin/`, `./bin/.` become `bin`).
+- The Zsh kit seeds `/etc/shells` before installing, matching the Fish kit, so
+  `add-shell` cannot fail on the minimal agent workload.
+- Verification now starts the selected Bash, Zsh, or Fish login shell and
+  confirms that every tool required by the chosen preset resolves through its
+  real interactive `PATH`. A dedicated Bash kit now explicitly selects
+  `/bin/bash` instead of inheriting `/bin/sh` from the Codex base image, while
+  the generic host-overlay kit no longer overrides selected Zsh or Fish login
+  shells. Zsh enables completion, and Fish familiar-mode extraction ignores
+  nested functions instead of treating their aliases as top-level statements.
+- Live Claude verification now accepts its JSON result as one record in a
+  line-oriented output stream, matching the Codex and Pi checks. Benign
+  launcher notices or harmless variation in model wording can no longer make
+  a successful nonempty proxied response fail verification; error and empty
+  results remain rejected.
+- `rust-analyzer` now always launches the pinned 1.99.1 server instead of
+  allowing rustup's shim to select an older nested project toolchain that may
+  not include the component. Cargo and rustc still follow each project's
+  `rust-toolchain` manifest, and verification checks the analyzer from every
+  discovered toolchain directory.
+- `sbxr setup --prebuild` removes abandoned launcher-owned warm-up sandboxes
+  before starting another build. Ownership is checked with `ps` (Linux and
+  macOS) and requires the recorded PID to still be an sbxr process. The documented warm-up scope is the default
+  Bash composition; opt-in shell layers are built on their first use. The
+  documentation also makes explicit that this reuses kit assembly, while each
+  real sandbox still initializes fresh persistent volumes and runs idempotent
+  install hooks; sbxr does not use incomplete volume-omitting snapshots.
+- Reconciliation now validates the known proxy-managed credential paths and
+  enforces guest-private `0600` mode on Codex, Claude, and Pi sentinel files.
+  This fixes the broader mode initially assigned to Codex and Claude stores by
+  the upstream workload while keeping the audit fail-closed.
+- Orca repair now detects and installs the NSPR runtime required by its
+  Electron AppImage on hardened Kits v3 images, while reusing the existing
+  checksum-verified extraction.
+- Orca startup now safely recovers the stale daemon lock retained when its
+  sandbox-local data volume survives a microVM recreation. Recovery is limited
+  to Orca's explicit changed-machine-identity case and refuses a lock matching
+  a live local process.
+- Claude settings mirroring now removes credential-shaped fields. Pi
+  `models.json` mirroring removes literal API keys and credential-like headers
+  while retaining explicit environment-variable references. The guest audit no
+  longer mistakes numeric `maxTokens` model metadata for a token.
+- Rust verification now checks the pinned sbxr toolchain explicitly through
+  `rustup run`, so a legitimate project-root override is not reported as base
+  toolchain drift. It also validates every discovered project toolchain, and
+  reconciliation repairs a removed toolchain even when its cached manifest
+  marker still matches.
+- Remote VS Code extensions are installed in bounded batches, preventing a
+  large host inventory from accumulating installer memory in one process and
+  exhausting the sandbox VM.
+- `sbxr rm` now closes the matching Remote-SSH window before removing the VM,
+  preventing a recreated sandbox with the same name from inheriting a stale
+  canceled connection. Window-close polling is bounded and avoids a VS Code
+  status race after the last desktop window exits.
+- Network profiles are now genuinely runtime-reconfigurable without sandbox
+  recreation. Transitions add the new deny policy before removing prior
+  sbxr-owned rules, persist interrupted transitions safely, and support
+  Docker's one-rule-per-resource expansion.
+- Runtime verification now rejects unexpected extra kits, accounts for the
+  optional RocksDB kit, and verifies the selected network profile. Orca accepts
+  only TCP loopback port mappings and pairing payloads whose endpoint authority
+  is the expected guest loopback listener.
+
+### Testing
+
+- Added failure-path tests for runtime schema drift, missing command
+  capabilities, executable credential-audit fixtures, review isolation,
+  protected health-ledger transitions, relay-profile validation, non-loopback
+  Orca mappings, and the guarded Orca stale-lock script contract. Added
+  multi-toolchain verification and bounded extension-batch regression
+  coverage, plus a bounded-process regression for the VS Code status probe.
+- Added behavioral regressions for Docker auth parsing and credential helpers,
+  plural credential fields, exact kit inventories, sandbox-name traversal,
+  runtime network contracts, split network rules, TCP-only published ports,
+  and Orca endpoint validation.
 
 ## [0.3.1] - 2026-11-04
 
