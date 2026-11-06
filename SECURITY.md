@@ -43,6 +43,15 @@ unsupported-secret boundaries are described in
   scripts and package checksums are recorded in `THIRD_PARTY_REVIEW.md`. This
   addresses the bootstrap chicken-and-egg problem: installing the isolation
   launcher does not first fetch a newly resolved dependency graph.
+- Official binary releases are compiled natively with the exact stable Rust
+  version in `RUST_RELEASE_VERSION` and `cargo --offline --frozen`. External
+  GitHub Actions are pinned to immutable commits; all platform builds and local
+  installer smoke tests must succeed before publication. Every archive,
+  checksum file, and installer receives GitHub build-provenance attestation.
+  The installers verify the selected archive's repository/workflow/tag
+  provenance, SHA-256, embedded version, and non-symlink destination before
+  installation. Source installation remains available for users who prefer to
+  audit and compile the reviewed tree themselves.
 - Docker's credential proxy keeps the real ChatGPT, Claude, and GitHub tokens
   outside the VM. Codex, Claude, Pi, Git/gh, and optional GHCR access receive
   only host-scoped sentinels or proxy-injected requests.
@@ -85,6 +94,11 @@ unsupported-secret boundaries are described in
 
 ## Limits
 
+- A verified release attestation identifies the repository, workflow, and tag
+  that produced an artifact; it does not prove the source or GitHub-hosted
+  runner benign. macOS and Windows artifacts are not yet platform-vendor code
+  signed, and those hosts remain expected rather than end-to-end tested until
+  the platform checklist is completed.
 - Cargo intentionally executes arbitrary build scripts and procedural macros.
 - Malicious code already present in a crate needs no second network request.
 - Allowed registries, GitHub, agent, npm, and VS Code hosts remain reachable;

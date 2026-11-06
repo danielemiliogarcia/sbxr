@@ -883,12 +883,12 @@ fn report_tool_versions(
             "gh" => Some(PINNED_GH_VERSION),
             _ => None,
         };
-        if let Some(expected) = expected
-            && !version.contains(expected)
-        {
-            return Err(format!(
-                "sandbox {tool} version drift: expected {expected}, got {version}"
-            ));
+        if let Some(expected) = expected {
+            if !version.contains(expected) {
+                return Err(format!(
+                    "sandbox {tool} version drift: expected {expected}, got {version}"
+                ));
+            }
         }
     }
     Ok(())

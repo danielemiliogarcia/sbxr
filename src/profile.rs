@@ -601,6 +601,8 @@ fn inspect_protected_file(path: &Path) -> Result<(), String> {
                     path.display()
                 ));
             }
+            #[cfg(not(unix))]
+            let _ = metadata;
             Ok(())
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -892,13 +894,12 @@ pub(crate) fn validate_shell_mirror_path(
             .map_err(|error| format!("could not resolve the protected state path: {error}"))?
             .join(state_root)
     };
-    if let Ok(relative_state) = absolute_state.strip_prefix(home)
-        && !relative_state.as_os_str().is_empty()
-        && paths_overlap(selected, relative_state)
-    {
-        return Err(format!(
-            "refusing host shell path '{relative}': it is inside, or would contain, the protected sbxr state directory"
-        ));
+    if let Ok(relative_state) = absolute_state.strip_prefix(home) {
+        if !relative_state.as_os_str().is_empty() && paths_overlap(selected, relative_state) {
+            return Err(format!(
+                "refusing host shell path '{relative}': it is inside, or would contain, the protected sbxr state directory"
+            ));
+        }
     }
     Ok(())
 }
@@ -1267,10 +1268,10 @@ fn prompt_cpus(current: Option<u32>) -> Result<Option<u32>, String> {
         if value == "auto" || value == "none" {
             return Ok(None);
         }
-        if let Ok(value) = value.parse::<u32>()
-            && value > 0
-        {
-            return Ok(Some(value));
+        if let Ok(value) = value.parse::<u32>() {
+            if value > 0 {
+                return Ok(Some(value));
+            }
         }
         println!("CPUs must be auto or a positive integer");
     }

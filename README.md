@@ -8,10 +8,19 @@ Its default preset is the complete multi-agent environment.
 ## Quick start
 
 ```bash
-# ONLY ONCE: install sbxr, or rerun this command to upgrade from master.
-cargo install --locked --force \
-  --git https://github.com/danielemiliogarcia/sbxr.git \
-  --branch master
+# ONLY ONCE: install the latest verified binary release (host Rust is not needed).
+version=$(gh api 'repos/danielemiliogarcia/sbxr/releases?per_page=100' \
+  --jq '[.[] | select(any(.assets[]; .name == "install.sh"))][0].tag_name')
+test -n "$version"
+gh release download "$version" --repo danielemiliogarcia/sbxr \
+  --pattern install.sh --clobber
+gh attestation verify install.sh \
+  --repo danielemiliogarcia/sbxr \
+  --signer-workflow danielemiliogarcia/sbxr/.github/workflows/release.yml \
+  --source-ref "refs/tags/$version" --deny-self-hosted-runners
+chmod +x install.sh
+SBXR_VERSION="$version" ./install.sh
+rm install.sh
 
 # ONLY ONCE: configure login/OAuth/Remote-SSH, then verify the host.
 # Setup is safe to rerun later if host configuration changes.
@@ -37,7 +46,10 @@ directory above; an empty directory is initialized with Cargo automatically.
 - Docker Sandboxes `sbx` 0.51.0 or newer (required for Kits v3). Follow Docker's official
   [installation and sign-in guide](https://docs.docker.com/ai/sandboxes/install/).
   Docker Desktop and Docker Engine are not required just to use `sbx`.
-- Rust and Cargo 1.85 or newer to build and install `sbxr` from source.
+- GitHub CLI (`gh`) for the verified binary installer and the default GitHub
+  credential-proxy integration.
+- Rust and Cargo 1.85 or newer only when building `sbxr` from source. They are
+  not needed to run a prebuilt release.
 - Native VS Code with the `code` command on `PATH`, plus an OpenSSH client.
 - On Linux/X11, `wmctrl` is recommended so `sbxr stop` and `sbxr rm` can
   gracefully close only the matching Remote-SSH window (`sudo apt-get install
@@ -576,7 +588,90 @@ private in-VM clone until the developer explicitly retrieves them.
 
 ## Installation and bootstrap security
 
-Convenient installation or upgrade from the latest public `master` branch:
+### Verified prebuilt release (recommended)
+
+Release archives contain the single native `sbxr` executable and its license,
+security, credential-architecture, dependency-review, and release-manifest
+documents, including the vendored dependencies' license texts. Rust is not
+required on the host. Docker's separately distributed `sbx` CLI remains a
+prerequisite.
+Prebuilt installation starts with release `0.3.4`; the quick-start query
+deliberately selects the newest release that actually contains `install.sh`
+instead of selecting an older source-only release.
+
+On Linux x86-64/ARM64 and Apple-silicon macOS, choose an exact release and
+verify the installer itself before executing it:
+
+```bash
+version=REPLACE_WITH_RELEASE_VERSION
+gh release download "$version" --repo danielemiliogarcia/sbxr \
+  --pattern install.sh --clobber
+gh attestation verify install.sh \
+  --repo danielemiliogarcia/sbxr \
+  --signer-workflow danielemiliogarcia/sbxr/.github/workflows/release.yml \
+  --source-ref "refs/tags/$version" --deny-self-hosted-runners
+chmod +x install.sh
+SBXR_VERSION="$version" ./install.sh
+rm install.sh
+```
+
+The default destination is `~/.local/bin/sbxr`. Set `SBXR_INSTALL_DIR` to an
+alternative. The installer detects the host target, downloads only its matching
+archive and `SHA256SUMS`, verifies the archive's GitHub build attestation and
+SHA-256, checks `sbxr --version`, and atomically replaces a non-symlink
+destination.
+
+On Windows x86-64, use PowerShell:
+
+```powershell
+$Version = "REPLACE_WITH_RELEASE_VERSION"
+gh release download $Version --repo danielemiliogarcia/sbxr `
+  --pattern install.ps1 --clobber
+gh attestation verify .\install.ps1 `
+  --repo danielemiliogarcia/sbxr `
+  --signer-workflow danielemiliogarcia/sbxr/.github/workflows/release.yml `
+  --source-ref "refs/tags/$Version" --deny-self-hosted-runners
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Version $Version
+Remove-Item .\install.ps1
+```
+
+The Windows default is `%LOCALAPPDATA%\sbxr\bin\sbxr.exe`;
+`SBXR_INSTALL_DIR` selects another directory.
+
+### Manual binary installation
+
+The installer is optional. Download the archive matching the host directly
+from the release page together with `SHA256SUMS`:
+
+| Host | Release archive |
+|---|---|
+| Linux x86-64 | `sbxr-VERSION-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 | `sbxr-VERSION-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS Apple silicon | `sbxr-VERSION-aarch64-apple-darwin.tar.gz` |
+| Windows x86-64 | `sbxr-VERSION-x86_64-pc-windows-msvc.zip` |
+
+Verify the selected archive before extracting it:
+
+```bash
+gh attestation verify sbxr-VERSION-TARGET.ARCHIVE \
+  --repo danielemiliogarcia/sbxr \
+  --signer-workflow danielemiliogarcia/sbxr/.github/workflows/release.yml \
+  --source-ref refs/tags/VERSION --deny-self-hosted-runners
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+Then extract the target-specific directory and copy `sbxr` to a directory on
+`PATH`, such as `~/.local/bin`. On macOS use `shasum -a 256`; on Windows use
+`Get-FileHash -Algorithm SHA256` and compare it with `SHA256SUMS`.
+
+Checksums detect corruption. The GitHub attestation additionally binds an
+artifact to this repository, its tag, and the pinned release workflow. Neither
+is a substitute for trusting that reviewed source and workflow.
+
+### Build from source
+
+Convenient source installation or upgrade from the latest public `master`
+branch:
 
 ```bash
 cargo install --locked --force \
@@ -618,11 +713,15 @@ discover the repository-local Cargo configuration. To use the vendored offline
 path, clone or unpack the reviewed revision and use
 `cargo install --frozen --path .`.
 
-`publish = false` currently prevents a misleading `cargo install sbxr`
-claim: no crates.io release exists yet. Release binaries can also be built for
-each Docker-Sandboxes-supported host platform. The binary automatically writes
-its embedded kits under the platform data directory; developers do not need a
-separate kit checkout.
+`publish = false` prevents a misleading `cargo install sbxr` claim: no
+crates.io package exists. Tagged release binaries are built with the exact
+stable compiler recorded in `RUST_RELEASE_VERSION`, currently Rust 1.99.1,
+while `rust-version = 1.85` remains the tested minimum for source builders.
+Every release build uses `--offline --frozen` against the committed vendor
+tree, runs natively on its target GitHub-hosted runner, smoke-tests the binary
+and installer, and is published only after all targets succeed. The binary
+automatically writes its embedded kits under the platform data directory;
+users do not need Rust or a separate kit checkout.
 
 ## Host setup behavior
 

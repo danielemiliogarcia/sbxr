@@ -1,0 +1,164 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned stable Rust release compiler
+        shell: bash
+        run: |
+          rust_version=$(tr -d '[:space:]' < RUST_RELEASE_VERSION)
+          rustup toolchain install "$rust_version" --profile minimal --component clippy,rustfmt
+          rustup override set "$rust_version"
+      - name: Verify tag and release metadata
+        run: ./scripts/verify-release-metadata.sh
+      - name: Test from vendored dependencies
+        run: cargo test --all-targets --offline --frozen
+      - name: Lint
+        run: cargo clippy --all-targets --all-features --offline --frozen -- -D warnings
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            windows: false
+            rustflags: ""
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            windows: false
+            rustflags: ""
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            windows: false
+            rustflags: ""
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            windows: true
+            rustflags: -C target-feature=+crt-static
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned stable Rust release compiler
+        shell: bash
+        run: |
+          rust_version=$(tr -d '[:space:]' < RUST_RELEASE_VERSION)
+          rustup toolchain install "$rust_version" --profile minimal --target "${{ matrix.target }}"
+          rustup override set "$rust_version"
+      - name: Build from vendored dependencies
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo build --release --target ${{ matrix.target }} --offline --frozen
+      - name: Smoke-test the native binary
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/sbxr"
+          if [[ "${{ matrix.windows }}" == true ]]; then binary="$binary.exe"; fi
+          test "$("$binary" --version)" = "sbxr $(tr -d '[:space:]' < VERSION)"
+          "$binary" help >/dev/null
+      - name: Package the release archive
+        shell: bash
+        env:
+          SBXR_RELEASE_RUSTFLAGS: ${{ matrix.rustflags }}
+        run: |
+          archive=$(./scripts/package-release.sh "${{ matrix.target }}")
+          ./scripts/write-release-checksum.sh "$archive"
+      - name: Smoke-test the Unix installer
+        if: ${{ !matrix.windows }}
+        shell: bash
+        env:
+          SBXR_RELEASE_DIR: ${{ github.workspace }}/target/distrib
+          SBXR_INSTALL_DIR: ${{ runner.temp }}/sbxr-bin
+        run: |
+          SBXR_VERSION=$(tr -d '[:space:]' < VERSION) ./install.sh
+          test "$("$SBXR_INSTALL_DIR/sbxr" --version)" = "sbxr $(tr -d '[:space:]' < VERSION)"
+      - name: Smoke-test the Windows installer
+        if: ${{ matrix.windows }}
+        shell: pwsh
+        env:
+          SBXR_RELEASE_DIR: ${{ github.workspace }}\target\distrib
+          SBXR_INSTALL_DIR: ${{ runner.temp }}\sbxr-bin
+        run: |
+          $version = (Get-Content VERSION).Trim()
+          ./install.ps1 -Version $version
+          if ((& "$env:SBXR_INSTALL_DIR\sbxr.exe" --version) -ne "sbxr $version") { throw "installed binary smoke test failed" }
+      - name: Upload the release archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.target }}
+          path: target/distrib/sbxr-*
+          if-no-files-found: error
+
+  publish:
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
+    needs:
+      - verify
+      - build
+    runs-on: ubuntu-24.04
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download all platform archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+      - name: Assemble and verify the release set
+        shell: bash
+        run: |
+          cp install.sh install.ps1 release/
+          test "$(find release -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l)" -eq 4
+          (
+            cd release
+            sha256sum sbxr-* install.sh install.ps1 > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+      - name: Attest every published artifact
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release/*
+      - name: Create the GitHub release
+        shell: bash
+        run: |
+          version=$(tr -d '[:space:]' < VERSION)
+          gh release create "$version" \
+            --verify-tag \
+            --target "${{ github.sha }}" \
+            --title "sbxr $version" \
+            --generate-notes \
+            release/*

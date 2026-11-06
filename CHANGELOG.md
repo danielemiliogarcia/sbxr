@@ -1,9 +1,17 @@
 # Changelog
 
-## Unreleased
+## [0.3.4] - 2026-11-06
 
 ### Added
 
+- Added a tag-gated native release matrix for Linux x86-64/ARM64,
+  Apple-silicon macOS, and Windows x86-64. Release builds use the exact pinned
+  current-stable Rust compiler with the committed vendored dependency tree,
+  smoke-test each native binary and its installer, publish SHA-256 checksums,
+  and attach GitHub build-provenance attestations. Verified POSIX and
+  PowerShell installers plus documented manual archive installation let users
+  run sbxr without installing Rust; source builds remain available and CI
+  separately enforces the Rust 1.85 MSRV.
 - Added first-class Bash, Zsh, and Fish login-shell profiles. The existing
   familiar Bash experience remains the default; protected profiles, direct
   flags, and the wizard can select `familiar`, `minimal`, or `custom`
@@ -102,6 +110,9 @@
 
 ### Fixed
 
+- Restored the declared Rust 1.85 source-build compatibility by replacing five
+  nonessential newer let-chain expressions. CI now compiles all targets at the
+  declared MSRV so future compatibility drift fails before release.
 - Mirrored host shell files now live under one launcher-owned guest root,
   `~/.local/share/sbxr/host-shell`, instead of at their host-relative paths in
   `/home/agent`. Selecting a path such as `.cargo/bin` or `.local/bin` can no

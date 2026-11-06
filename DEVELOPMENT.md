@@ -15,6 +15,10 @@ network permissions, or sandbox mounts.
 
 The normal build and unit-test workflow is offline. Docker, `sbx`, KVM, agent
 subscriptions, and VS Code are not required merely to compile the binary.
+Rust 1.85 is the minimum supported source compiler. Official release artifacts
+are built with the exact current stable compiler recorded in
+`RUST_RELEASE_VERSION`; these are separate promises, so updating the release
+compiler does not raise the MSRV.
 
 ## Build, run, and install
 
@@ -62,6 +66,11 @@ first is unnecessary. `--force` replaces an existing `sbxr` installation.
 The repository's Cargo configuration resolves those dependencies from the
 reviewed `vendor/` tree. Do not remove `--frozen` merely to make a build pass;
 investigate inconsistent lockfile or vendor state instead.
+
+For release preparation and the binary/install-script trust model, see
+[RELEASING.md](RELEASING.md). The tag workflow also supports a manual dispatch
+that builds and smoke-installs every platform archive without publishing a
+GitHub Release.
 
 ## Architecture
 

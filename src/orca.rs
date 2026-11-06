@@ -212,10 +212,10 @@ fn rewrite_pairing_endpoint(link: &str, port: u16) -> Result<String, String> {
 fn rewrite_loopback_endpoint(endpoint: &str, port: u16) -> Option<String> {
     for scheme in ["ws", "wss", "http", "https"] {
         let prefix = format!("{scheme}://127.0.0.1:6768");
-        if let Some(suffix) = endpoint.strip_prefix(&prefix)
-            && (suffix.is_empty() || suffix.starts_with(['/', '?', '#']))
-        {
-            return Some(format!("{scheme}://127.0.0.1:{port}{suffix}"));
+        if let Some(suffix) = endpoint.strip_prefix(&prefix) {
+            if suffix.is_empty() || suffix.starts_with(['/', '?', '#']) {
+                return Some(format!("{scheme}://127.0.0.1:{port}{suffix}"));
+            }
         }
     }
     None

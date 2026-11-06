@@ -629,13 +629,14 @@ fn print_docker_diagnostics(json: &[u8]) -> Result<bool, String> {
             }
         };
         println!("{label} Docker: {name} — {message}");
-        if status == "fail"
-            && let Some(hint) = check
+        if status == "fail" {
+            if let Some(hint) = check
                 .get("hint")
                 .and_then(serde_json::Value::as_str)
                 .filter(|hint| !hint.is_empty())
-        {
-            println!("     {hint}");
+            {
+                println!("     {hint}");
+            }
         }
     }
     Ok(healthy)
