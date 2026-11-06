@@ -1,0 +1,4 @@
+# Cargo verifies every vendored source file byte-for-byte against the checksum
+# recorded by the package. Keep those blobs untouched when Git checks the
+# repository out on hosts whose default text convention is CRLF.
+vendor/** -text
