@@ -1,6 +1,6 @@
 use crate::cli::Preset;
 use crate::environment::{Context, Project, RocksDbHost};
-use crate::profile::Profile;
+use crate::profile::{Profile, ShellProgram};
 use crate::{sbx, sha256};
 use serde_json::json;
 use std::ffi::OsStr;
@@ -605,6 +605,11 @@ pub(crate) fn selected_local_kits(
     if let Kind::Development(preset) | Kind::Isolated(preset) = kind {
         kits.push(context.kit_root.join("node-runtime"));
         kits.push(context.kit_root.join("host-shell"));
+        match profile.shell.program {
+            ShellProgram::Bash => kits.push(context.kit_root.join("bash-shell")),
+            ShellProgram::Zsh => kits.push(context.kit_root.join("zsh-shell")),
+            ShellProgram::Fish => kits.push(context.kit_root.join("fish-shell")),
+        }
         kits.push(context.kit_root.join("git-ssh-sign"));
         kits.push(context.kit_root.join("github-ssh"));
         if profile.github_proxy {
@@ -1024,6 +1029,9 @@ mod tests {
         assert!(development.contains(CLAUDE_MIXIN));
         assert!(development.contains("/trusted/kits/node-runtime"));
         assert!(development.contains("/trusted/kits/pi-cli"));
+        assert!(development.contains("/trusted/kits/bash-shell"));
+        assert!(!development.contains("/trusted/kits/fish-shell"));
+        assert!(!development.contains("/trusted/kits/zsh-shell"));
         assert!(!development.contains("codex-cli"));
         assert!(development.contains("secrets:\n  github:"));
         assert!(!development.contains("ghp_"));
@@ -1068,6 +1076,20 @@ mod tests {
         )
         .unwrap();
         assert!(codex.contains("bindings:"));
+
+        let mut fish_profile = profile;
+        fish_profile.shell.program = ShellProgram::Fish;
+        let fish = render(
+            &context,
+            &project,
+            Kind::Development(Preset::Codex),
+            None,
+            &fish_profile,
+        )
+        .unwrap();
+        assert!(fish.contains("/trusted/kits/fish-shell"));
+        assert!(!fish.contains("/trusted/kits/bash-shell"));
+        assert!(!fish.contains("/trusted/kits/zsh-shell"));
     }
 
     #[test]
@@ -1102,6 +1124,7 @@ mod tests {
             "rust",
             "node-runtime",
             "host-shell",
+            "bash-shell",
             "git-ssh-sign",
             "github-ssh",
             "github-proxy",
@@ -1259,6 +1282,7 @@ mod tests {
             "rust",
             "node-runtime",
             "host-shell",
+            "bash-shell",
             "git-ssh-sign",
             "github-ssh",
             "github-proxy",
@@ -1357,6 +1381,7 @@ mod tests {
             "rust",
             "node-runtime",
             "host-shell",
+            "bash-shell",
             "git-ssh-sign",
             "github-ssh",
             "github-proxy",

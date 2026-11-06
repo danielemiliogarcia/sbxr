@@ -1,0 +1,17 @@
+# syntax=docker/sandbox-kit:3
+schemaVersion: "3"
+kind: mixin
+version: "1.0.0"
+displayName: Bash login shell
+description: Selects Bash as the agent login shell.
+sourceUrl: https://github.com/danielemiliogarcia/sbxr
+
+capabilities:
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        - command: |
+            set -euo pipefail
+            usermod -s /bin/bash agent
+          user: "0"
+          description: Select Bash as the agent login shell

@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-const KITS: [(&str, &str); 13] = [
+const KITS: [(&str, &str); 16] = [
     ("rust", include_str!("../kits/rust/spec.yaml")),
     (
         "node-runtime",
@@ -10,6 +10,9 @@ const KITS: [(&str, &str); 13] = [
     ("pi-cli", include_str!("../kits/pi-cli/spec.yaml")),
     ("paseo-cli", include_str!("../kits/paseo-cli/spec.yaml")),
     ("host-shell", include_str!("../kits/host-shell/spec.yaml")),
+    ("bash-shell", include_str!("../kits/bash-shell/spec.yaml")),
+    ("zsh-shell", include_str!("../kits/zsh-shell/spec.yaml")),
+    ("fish-shell", include_str!("../kits/fish-shell/spec.yaml")),
     (
         "rocksdb-host",
         include_str!("../kits/rocksdb-host/spec.yaml"),
@@ -65,12 +68,15 @@ const KIT_ASSETS: [(&str, &str, &[u8]); 6] = [
     ),
 ];
 
-pub(crate) const KIT_NAMES: [&str; 13] = [
+pub(crate) const KIT_NAMES: [&str; 16] = [
     "rust",
     "node-runtime",
     "pi-cli",
     "paseo-cli",
     "host-shell",
+    "bash-shell",
+    "zsh-shell",
+    "fish-shell",
     "rocksdb-host",
     "vscode-remote",
     "git-ssh-sign",
@@ -141,5 +147,17 @@ mod tests {
                 "{name} retained the removed v2 top-level name"
             );
         }
+    }
+
+    #[test]
+    fn rust_analyzer_ignores_nested_project_toolchain_overrides() {
+        let rust = KITS
+            .iter()
+            .find_map(|(name, descriptor)| (*name == "rust").then_some(*descriptor))
+            .unwrap();
+        assert!(
+            rust.contains("exec /home/agent/.cargo/bin/rustup run 1.99.1 rust-analyzer \"$@\"")
+        );
+        assert!(!rust.contains("rust-analyzer rustc rustdoc rustfmt rustup; do"));
     }
 }

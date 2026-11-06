@@ -1,15 +1,18 @@
+use crate::profile::{PromptStyle, ShellConfig, ShellProfile, ShellProgram};
 use crate::{process, sbx, sha256};
 use serde_json::{Map, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::env;
-use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::UNIX_EPOCH;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+use std::time::{Duration, UNIX_EPOCH};
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 const CODEX_PATHS: &[&str] = &[
     ".codex/AGENTS.md",
@@ -49,14 +52,230 @@ const PI_PATHS: &[&str] = &[
 
 const PI_EXTENSION_PATHS: &[&str] = &[".pi/agent/extensions"];
 
-const HOST_SHELL_PATHS: &[&str] = &[".bash_aliases", "bin"];
-const HOST_ALIASES_PATH: &str = "/home/agent/.config/sbxr/host-aliases.bash";
+const HOST_SHELL_PROFILE_MARKER: &str = "/home/agent/.config/sbxr/host-shell-profile.sha256";
+const HOST_SHELL_MIRROR_RELATIVE: &str = ".local/share/sbxr/host-shell";
+const HOST_SHELL_MIRROR_ROOT: &str = "/home/agent/.local/share/sbxr/host-shell";
 
 const REMOTE_RTK: &str = "/usr/local/bin/rtk";
 const PI_NPM_MANIFEST_MARKER: &str = "/home/agent/.pi/agent/npm/.sbxr-manifest-sha256";
 const PI_NPM_ROOT: &str = "/home/agent/.pi/agent/npm";
 const BOOTSTRAP_STATE_PATH: &str = "/home/agent/.local/state/sbxr/bootstrap-v1.json";
 const BOOTSTRAP_STATE_DIRECTORY: &str = "/home/agent/.local/state/sbxr";
+const INSTALL_HOST_SHELL_MIRROR: &str = r#"
+set -eu
+root=$1
+staging=$2
+backup=$3
+had_old=0
+rm -rf -- "$backup"
+if [ -e "$root" ] || [ -L "$root" ]; then
+  chmod -R u+w -- "$root" 2>/dev/null || true
+  mv -- "$root" "$backup"
+  had_old=1
+fi
+if mv -- "$staging" "$root"; then
+  if [ "$had_old" = 1 ]; then
+    rm -rf -- "$backup"
+  fi
+else
+  rm -rf -- "$root"
+  if [ "$had_old" = 1 ]; then
+    mv -- "$backup" "$root" || true
+  fi
+  exit 1
+fi
+"#;
+static HOST_SHELL_STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const HOST_SHELL_LOCK_INITIALIZATION_GRACE: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HostShellLockState {
+    Active,
+    Initializing,
+    Stale,
+}
+
+struct HostShellLock {
+    path: PathBuf,
+    pid: u32,
+}
+
+impl HostShellLock {
+    fn acquire(state_root: &Path, sandbox_name: &str) -> Result<Self, String> {
+        let directory = state_root.join("locks");
+        fs::create_dir_all(&directory).map_err(|error| {
+            format!(
+                "could not create the host-shell lock directory {}: {error}",
+                directory.display()
+            )
+        })?;
+        let metadata = fs::symlink_metadata(&directory).map_err(|error| {
+            format!(
+                "could not inspect the host-shell lock directory {}: {error}",
+                directory.display()
+            )
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(format!(
+                "refusing unsafe host-shell lock directory {}",
+                directory.display()
+            ));
+        }
+        #[cfg(unix)]
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            format!(
+                "could not protect the host-shell lock directory {}: {error}",
+                directory.display()
+            )
+        })?;
+
+        let key = sha256::hex(sandbox_name.as_bytes());
+        let path = directory.join(format!("host-shell-{key}.lock"));
+        let pid = std::process::id();
+        for attempt in 0..600 {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            match options.open(&path) {
+                Ok(mut file) => {
+                    if let Err(error) = writeln!(file, "{pid}").and_then(|()| file.flush()) {
+                        let _ = fs::remove_file(&path);
+                        return Err(format!(
+                            "could not initialize host-shell lock {}: {error}",
+                            path.display()
+                        ));
+                    }
+                    return Ok(Self { path, pid });
+                }
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                    match host_shell_lock_state(&path, HOST_SHELL_LOCK_INITIALIZATION_GRACE)? {
+                        HostShellLockState::Stale => match fs::remove_file(&path) {
+                            Ok(()) => continue,
+                            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                            Err(error) => {
+                                return Err(format!(
+                                    "could not remove stale host-shell lock {}: {error}",
+                                    path.display()
+                                ));
+                            }
+                        },
+                        HostShellLockState::Active | HostShellLockState::Initializing => {}
+                    }
+                    if attempt == 599 {
+                        return Err(format!(
+                            "timed out waiting for another sbxr process to finish shell reconciliation for {sandbox_name}"
+                        ));
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "could not acquire host-shell lock {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        unreachable!("bounded host-shell lock loop always returns")
+    }
+}
+
+impl Drop for HostShellLock {
+    fn drop(&mut self) {
+        if fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok())
+            == Some(self.pid)
+        {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn host_shell_lock_state(
+    path: &Path,
+    initialization_grace: Duration,
+) -> Result<HostShellLockState, String> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(HostShellLockState::Stale),
+        Err(error) => {
+            return Err(format!(
+                "could not read host-shell lock {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    if contents.trim().is_empty() {
+        let age = fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .unwrap_or_default();
+        return Ok(if age < initialization_grace {
+            HostShellLockState::Initializing
+        } else {
+            HostShellLockState::Stale
+        });
+    }
+    let pid = contents.trim().parse::<u32>().map_err(|_| {
+        format!(
+            "refusing malformed host-shell lock {}; remove it after confirming that no sbxr process is running",
+            path.display()
+        )
+    })?;
+    if pid == std::process::id() {
+        return Ok(HostShellLockState::Active);
+    }
+    Ok(if host_process_is_sbxr(pid)? {
+        HostShellLockState::Active
+    } else {
+        HostShellLockState::Stale
+    })
+}
+
+#[cfg(unix)]
+fn host_process_is_sbxr(pid: u32) -> Result<bool, String> {
+    let output = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|error| format!("could not inspect host-shell lock owner {pid}: {error}"))?;
+    if !output.status.success() {
+        return Ok(false);
+    }
+    let command = String::from_utf8_lossy(&output.stdout);
+    Ok(command
+        .trim()
+        .rsplit('/')
+        .next()
+        .is_some_and(|command| command.starts_with("sbxr")))
+}
+
+#[cfg(windows)]
+fn host_process_is_sbxr(pid: u32) -> Result<bool, String> {
+    let output = Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|error| format!("could not inspect host-shell lock owner {pid}: {error}"))?;
+    if !output.status.success() {
+        return Ok(false);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .to_ascii_lowercase()
+        .contains("sbxr"))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn host_process_is_sbxr(pid: u32) -> Result<bool, String> {
+    Err(format!(
+        "cannot inspect host-shell lock owner {pid} on this platform"
+    ))
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct BootstrapState {
@@ -533,53 +752,325 @@ fn sync_pi_npm_packages(
     )
 }
 
-pub(crate) fn host_shell(sandbox_name: &str, preserve_xdg_state: bool) -> Result<(), String> {
-    let home = process::home_dir()?;
-    let home_text = home.to_string_lossy();
-    let selected: Vec<PathBuf> = existing(&home, HOST_SHELL_PATHS).collect();
-    if !selected.is_empty() {
-        stream_tree(
-            sandbox_name,
-            preserve_xdg_state,
-            &home,
-            &home_text,
-            &selected,
-        )?;
-    }
-    mirror_host_bashrc_aliases(sandbox_name, preserve_xdg_state, &home, &home_text)
-}
-
-/// Copies the alias definitions out of the host `.bashrc` without adopting the
-/// rest of it: the surrounding file configures host toolchains, host paths, and
-/// host-only integrations that do not belong in a sandbox.
-fn mirror_host_bashrc_aliases(
+pub(crate) fn host_shell_profile_current(
     sandbox_name: &str,
     preserve_xdg_state: bool,
-    home: &Path,
-    home_text: &str,
-) -> Result<(), String> {
-    let bashrc = home.join(".bashrc");
-    if !bashrc.is_file() {
-        return Ok(());
-    }
-    let contents = fs::read_to_string(&bashrc)
-        .map_err(|error| format!("could not read {}: {error}", bashrc.display()))?;
-    let aliases = bashrc_alias_lines(&contents).replace(home_text, "/home/agent");
-    if aliases.is_empty() {
-        return Ok(());
-    }
-    let file = format!(
-        "# Managed by sbxr: alias definitions mirrored from the host ~/.bashrc.\n{aliases}"
-    );
-    upload_file(
-        sandbox_name,
-        preserve_xdg_state,
-        HOST_ALIASES_PATH,
-        file.as_bytes(),
+    shell: &ShellConfig,
+    state_root: &Path,
+) -> Result<bool, String> {
+    let home = process::home_dir()?;
+    let home_text = home.to_string_lossy();
+    let inputs = host_shell_inputs(shell, &home, &home_text, state_root)?;
+    let runtime = host_shell_runtime(shell, &inputs);
+    let expected = host_shell_profile_digest(shell, &inputs, &runtime, &home)?;
+    Ok(
+        remote_file(sandbox_name, preserve_xdg_state, HOST_SHELL_PROFILE_MARKER)?
+            .is_some_and(|value| value == expected.as_bytes()),
     )
 }
 
-fn bashrc_alias_lines(contents: &str) -> String {
+pub(crate) fn host_shell(
+    sandbox_name: &str,
+    preserve_xdg_state: bool,
+    shell: &ShellConfig,
+    state_root: &Path,
+) -> Result<(), String> {
+    let _lock = HostShellLock::acquire(state_root, sandbox_name)?;
+    let home = process::home_dir()?;
+    let home_text = home.to_string_lossy();
+    let inputs = host_shell_inputs(shell, &home, &home_text, state_root)?;
+    for warning in &inputs.warnings {
+        eprintln!("warning: {warning}");
+    }
+    let runtime = host_shell_runtime(shell, &inputs);
+    let digest = host_shell_profile_digest(shell, &inputs, &runtime, &home)?;
+    replace_host_shell_mirror(
+        sandbox_name,
+        preserve_xdg_state,
+        &home,
+        &home_text,
+        &inputs.selected,
+    )?;
+    remove_extracted_aliases(sandbox_name, preserve_xdg_state)?;
+    if let (Some(contents), Some(path)) = (
+        inputs.extracted_aliases.as_ref(),
+        extracted_alias_path(shell, &inputs),
+    ) {
+        let file = format!(
+            "# Managed by sbxr: alias definitions extracted from the trusted host shell RC.\n{contents}"
+        );
+        upload_file(
+            sandbox_name,
+            preserve_xdg_state,
+            &format!("/home/agent/{path}"),
+            file.as_bytes(),
+        )?;
+    }
+    let extension = shell.program.name();
+    upload_file(
+        sandbox_name,
+        preserve_xdg_state,
+        &format!("/home/agent/.config/sbxr/host-shell-runtime.{extension}"),
+        runtime.as_bytes(),
+    )?;
+    upload_file(
+        sandbox_name,
+        preserve_xdg_state,
+        HOST_SHELL_PROFILE_MARKER,
+        digest.as_bytes(),
+    )
+}
+
+fn extracted_alias_path(shell: &ShellConfig, inputs: &HostShellInputs) -> Option<&'static str> {
+    inputs
+        .extracted_aliases
+        .as_ref()
+        .map(|_| match shell.program {
+            ShellProgram::Bash => ".config/sbxr/host-aliases.bash",
+            ShellProgram::Zsh => ".config/sbxr/host-aliases.zsh",
+            ShellProgram::Fish => ".config/sbxr/host-aliases.fish",
+        })
+}
+
+fn host_shell_runtime(shell: &ShellConfig, inputs: &HostShellInputs) -> String {
+    render_host_shell_runtime(
+        shell,
+        &inputs.alias_files,
+        &inputs.bin_dirs,
+        extracted_alias_path(shell, inputs),
+    )
+}
+
+struct HostShellInputs {
+    alias_files: Vec<String>,
+    bin_dirs: Vec<String>,
+    extracted_aliases: Option<String>,
+    selected: Vec<PathBuf>,
+    warnings: Vec<String>,
+}
+
+fn host_shell_inputs(
+    shell: &ShellConfig,
+    home: &Path,
+    home_text: &str,
+    state_root: &Path,
+) -> Result<HostShellInputs, String> {
+    let mut alias_files = if shell.profile == ShellProfile::Custom {
+        shell.alias_files.clone()
+    } else {
+        Vec::new()
+    };
+    let mut bin_dirs = if shell.profile == ShellProfile::Custom {
+        shell.bin_dirs.clone()
+    } else {
+        Vec::new()
+    };
+    let mut implicit_alias_files = BTreeSet::new();
+    let mut implicit_bin_dirs = BTreeSet::new();
+    let mut extracted_aliases = None;
+    if shell.profile == ShellProfile::Familiar {
+        let (rc, aliases) = match shell.program {
+            ShellProgram::Bash => (".bashrc", ".bash_aliases"),
+            ShellProgram::Zsh => (".zshrc", ".zsh_aliases"),
+            ShellProgram::Fish => (
+                ".config/fish/config.fish",
+                ".config/fish/conf.d/aliases.fish",
+            ),
+        };
+        if home.join(aliases).exists() && !alias_files.iter().any(|value| value == aliases) {
+            alias_files.insert(0, aliases.to_owned());
+            implicit_alias_files.insert(aliases.to_owned());
+        }
+        if home.join("bin").exists() && !bin_dirs.iter().any(|value| value == "bin") {
+            bin_dirs.insert(0, "bin".to_owned());
+            implicit_bin_dirs.insert("bin".to_owned());
+        }
+        extracted_aliases = extract_host_aliases(&home.join(rc), shell.program)?;
+    }
+
+    // Top-level selections may be symlinks (stow, chezmoi and dotfiles repos
+    // link `~/.bash_aliases` or `~/bin`); the mirror copies what they point
+    // at. Both the name and the resolved target are checked against the
+    // protected stores so a link cannot smuggle one in.
+    let mut selected = BTreeSet::new();
+    let mut warnings = Vec::new();
+    for (relative, want_dir, implicit) in alias_files
+        .iter()
+        .map(|relative| (relative, false, implicit_alias_files.contains(relative)))
+        .chain(
+            shell
+                .prompt_file
+                .iter()
+                .map(|relative| (relative, false, false)),
+        )
+        .chain(
+            bin_dirs
+                .iter()
+                .map(|relative| (relative, true, implicit_bin_dirs.contains(relative))),
+        )
+    {
+        let source = home.join(relative);
+        let kind = if want_dir {
+            "executable directory"
+        } else {
+            "shell file"
+        };
+        let validation = (|| {
+            crate::profile::validate_shell_mirror_path(relative, home, state_root)?;
+            let metadata = fs::metadata(&source).map_err(|error| {
+                format!(
+                    "selected host {kind} is unavailable: {}: {error}",
+                    source.display()
+                )
+            })?;
+            if (want_dir && !metadata.is_dir()) || (!want_dir && !metadata.is_file()) {
+                return Err(format!(
+                    "selected host {kind} must resolve to a {}: {}",
+                    if want_dir {
+                        "directory"
+                    } else {
+                        "regular file"
+                    },
+                    source.display()
+                ));
+            }
+            crate::profile::validate_resolved_shell_path(relative, home, state_root)
+        })();
+        if let Err(error) = validation {
+            if implicit {
+                warnings.push(format!(
+                    "skipping automatically discovered host {kind} '{}': {error}",
+                    source.display()
+                ));
+                continue;
+            }
+            return Err(error);
+        }
+        selected.insert(PathBuf::from(relative));
+    }
+    alias_files.retain(|relative| selected.contains(Path::new(relative)));
+    bin_dirs.retain(|relative| selected.contains(Path::new(relative)));
+    let selected = selected.into_iter().collect::<Vec<_>>();
+    let extracted_aliases =
+        extracted_aliases.map(|aliases| rewrite_shell_paths(&aliases, home_text, &selected));
+    Ok(HostShellInputs {
+        alias_files,
+        bin_dirs,
+        extracted_aliases,
+        selected,
+        warnings,
+    })
+}
+
+/// Copies alias definitions out of a host shell RC without adopting the rest
+/// of it. Toolchain setup, host paths, and host-only integrations do not belong
+/// in a sandbox unless the user selects a dedicated file explicitly.
+fn extract_host_aliases(rc: &Path, program: ShellProgram) -> Result<Option<String>, String> {
+    if !rc.is_file() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(rc)
+        .map_err(|error| format!("could not read {}: {error}", rc.display()))?;
+    let aliases = match program {
+        ShellProgram::Fish => fish_alias_lines(&contents),
+        ShellProgram::Bash | ShellProgram::Zsh => shell_alias_lines(&contents),
+    };
+    if aliases.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(aliases))
+}
+
+/// Rewrites host paths in mirrored shell text. References to a mirrored path
+/// (`/host/home/bin/x`, `~/bin/x`, `$HOME/bin/x`, `${HOME}/bin/x`) point at the
+/// launcher-owned mirror root; any other absolute host-home path maps to
+/// `/home/agent`, as for every other mirrored capability.
+fn rewrite_shell_paths(text: &str, host_home: &str, mirrored: &[PathBuf]) -> String {
+    let mut relatives = mirrored
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    relatives.sort_by_key(|relative| std::cmp::Reverse(relative.len()));
+    // Quoted forms first: `"$HOME"/bin/x` keeps its quotes and gains the
+    // mirror segment after them.
+    let prefixes = [
+        host_home,
+        "\"${HOME}\"",
+        "\"$HOME\"",
+        "${HOME}",
+        "$HOME",
+        "~",
+    ];
+    let mut output = String::with_capacity(text.len());
+    let mut index = 0;
+    'scan: while index < text.len() {
+        for prefix in prefixes {
+            if prefix.is_empty()
+                || !text[index..].starts_with(prefix)
+                || !prefix_boundary_before(text, index, prefix, host_home)
+            {
+                continue;
+            }
+            let after = index + prefix.len();
+            for relative in &relatives {
+                let needle = format!("/{relative}");
+                let end = after + needle.len();
+                if text[after..].starts_with(&needle) && path_boundary_after(text, end) {
+                    output.push_str(if prefix == host_home {
+                        "/home/agent"
+                    } else {
+                        prefix
+                    });
+                    output.push('/');
+                    output.push_str(HOST_SHELL_MIRROR_RELATIVE);
+                    output.push_str(&needle);
+                    index = end;
+                    continue 'scan;
+                }
+            }
+            if prefix == host_home && path_boundary_after(text, after) {
+                output.push_str("/home/agent");
+                index = after;
+                continue 'scan;
+            }
+        }
+        let character = text[index..].chars().next().unwrap_or_default();
+        output.push(character);
+        index += character.len_utf8().max(1);
+    }
+    output
+}
+
+fn prefix_boundary_before(text: &str, index: usize, prefix: &str, host_home: &str) -> bool {
+    let previous = text[..index].chars().next_back();
+    if prefix == "~" {
+        previous
+            .is_none_or(|character| !(character.is_alphanumeric() || "._-/~$".contains(character)))
+    } else if prefix == host_home {
+        // `/data/home/emi` must not match a host home of `/home/emi`.
+        previous
+            .is_none_or(|character| !(character.is_alphanumeric() || "._-/".contains(character)))
+    } else {
+        // `\$HOME` is an escaped literal, not the variable.
+        previous != Some('\\')
+    }
+}
+
+fn path_boundary_after(text: &str, index: usize) -> bool {
+    text[index..].chars().next().is_none_or(|character| {
+        character == '/' || !(character.is_alphanumeric() || "._-".contains(character))
+    })
+}
+
+fn fish_alias_lines(contents: &str) -> String {
+    contents
+        .lines()
+        .filter(|line| line.starts_with("alias "))
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+fn shell_alias_lines(contents: &str) -> String {
     let mut output = String::new();
     let mut continued = false;
     for line in contents.lines() {
@@ -592,6 +1083,291 @@ fn bashrc_alias_lines(contents: &str) -> String {
         continued = line.ends_with('\\');
     }
     output
+}
+
+fn host_shell_profile_digest(
+    shell: &ShellConfig,
+    inputs: &HostShellInputs,
+    runtime: &str,
+    home: &Path,
+) -> Result<String, String> {
+    let mut input = b"sbxr-host-shell-v4\0".to_vec();
+    for part in [
+        shell.profile.name(),
+        shell.program.name(),
+        shell.prompt.name(),
+        shell.prompt_file.as_deref().unwrap_or(""),
+    ] {
+        input.extend_from_slice(part.as_bytes());
+        input.push(0);
+    }
+    for values in [&shell.alias_files, &shell.bin_dirs] {
+        for value in values {
+            input.extend_from_slice(value.as_bytes());
+            input.push(0);
+        }
+        input.push(0xff);
+    }
+    if let Some(aliases) = &inputs.extracted_aliases {
+        input.extend_from_slice(aliases.as_bytes());
+    }
+    input.push(0xff);
+    // The rendered overlay is part of the digest, so a launcher release that
+    // changes it refreshes existing sandboxes without a manual tag bump.
+    input.extend_from_slice(runtime.as_bytes());
+    input.push(0xff);
+    for relative in &inputs.selected {
+        fingerprint_shell_tree(&home.join(relative), relative, &mut input)?;
+    }
+    Ok(sha256::hex(&input))
+}
+
+fn replace_host_shell_mirror(
+    sandbox_name: &str,
+    preserve_xdg_state: bool,
+    home: &Path,
+    home_text: &str,
+    selected: &[PathBuf],
+) -> Result<(), String> {
+    // Never delete a user-selected guest path. A host selection such as
+    // `.cargo/bin` or `.local/bin` may collide with sandbox-managed tools.
+    // All mirrored shell inputs therefore live below one launcher-owned root.
+    // They are staged next to it and swapped in, so a failed copy leaves the
+    // previous mirror in place.
+    let token = format!(
+        "{}-{}",
+        std::process::id(),
+        HOST_SHELL_STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let staging = format!("{HOST_SHELL_MIRROR_ROOT}.staging-{token}");
+    let backup = format!("{HOST_SHELL_MIRROR_ROOT}.backup-{token}");
+    process::run_checked(
+        sbx::exec_command(preserve_xdg_state).args([
+            sandbox_name,
+            "--",
+            "sh",
+            "-c",
+            "set -eu; for path in \"$2\".staging-* \"$2\".backup-*; do if [ -e \"$path\" ] || [ -L \"$path\" ]; then chmod -R u+w -- \"$path\" 2>/dev/null || true; rm -rf -- \"$path\"; fi; done; mkdir -p -- \"$1\"",
+            "sh",
+            &staging,
+            HOST_SHELL_MIRROR_ROOT,
+        ]),
+        "preparing the managed host shell mirror",
+    )?;
+    if !selected.is_empty() {
+        if let Err(error) = stream_shell_tree(
+            sandbox_name,
+            preserve_xdg_state,
+            home,
+            home_text,
+            selected,
+            &staging,
+        ) {
+            let _ = process::run_checked(
+                sbx::exec_command(preserve_xdg_state).args([
+                    sandbox_name,
+                    "--",
+                    "rm",
+                    "-rf",
+                    "--",
+                    &staging,
+                ]),
+                "cleaning an incomplete host shell mirror",
+            );
+            return Err(error);
+        }
+    }
+    process::run_checked(
+        sbx::exec_command(preserve_xdg_state).args([
+            sandbox_name,
+            "--",
+            "sh",
+            "-c",
+            INSTALL_HOST_SHELL_MIRROR,
+            "sh",
+            HOST_SHELL_MIRROR_ROOT,
+            &staging,
+            &backup,
+        ]),
+        "installing the managed host shell mirror",
+    )
+}
+
+fn remove_extracted_aliases(sandbox_name: &str, preserve_xdg_state: bool) -> Result<(), String> {
+    process::run_checked(
+        sbx::exec_command(preserve_xdg_state)
+            .arg(sandbox_name)
+            .args([
+                "--",
+                "rm",
+                "-f",
+                "--",
+                "/home/agent/.config/sbxr/host-aliases.bash",
+                "/home/agent/.config/sbxr/host-aliases.zsh",
+                "/home/agent/.config/sbxr/host-aliases.fish",
+            ]),
+        "clearing stale extracted host aliases",
+    )
+}
+
+fn fingerprint_shell_tree(
+    source: &Path,
+    archive: &Path,
+    input: &mut Vec<u8>,
+) -> Result<(), String> {
+    let root = fs::canonicalize(source)
+        .map_err(|error| format!("could not resolve {}: {error}", source.display()))?;
+    // Start from the resolved root: a symlinked selection is mirrored by
+    // content, so its target's contents are what must be fingerprinted.
+    fingerprint_shell_entry(&root, archive, &root, input)
+}
+
+fn fingerprint_shell_entry(
+    source: &Path,
+    archive: &Path,
+    root: &Path,
+    input: &mut Vec<u8>,
+) -> Result<(), String> {
+    if should_skip(archive, true) {
+        return Ok(());
+    }
+    let metadata = fs::symlink_metadata(source)
+        .map_err(|error| format!("could not inspect {}: {error}", source.display()))?;
+    input.extend_from_slice(archive.to_string_lossy().as_bytes());
+    input.push(0);
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .unwrap_or_default();
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o7777
+    };
+    #[cfg(not(unix))]
+    let mode = u32::from(metadata.permissions().readonly());
+    input.extend_from_slice(
+        format!(
+            "{}:{}:{}:{}:{mode:o}\0",
+            metadata.is_dir(),
+            metadata.is_file(),
+            metadata.len(),
+            modified.as_nanos()
+        )
+        .as_bytes(),
+    );
+    if metadata.file_type().is_symlink() {
+        // Hash the link text whether or not it resolves. The archive writer
+        // skips broken and escaping links, so neither may fail the launch.
+        let target = fs::read_link(source)
+            .map_err(|error| format!("could not read symlink {}: {error}", source.display()))?;
+        input.extend_from_slice(target.to_string_lossy().as_bytes());
+        input.push(0);
+        if let Ok(resolved) = fs::canonicalize(source) {
+            input.push(u8::from(resolved.starts_with(root)));
+        }
+    } else if metadata.is_dir() {
+        let mut entries = fs::read_dir(source)
+            .map_err(|error| format!("could not read {}: {error}", source.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("could not read {}: {error}", source.display()))?;
+        entries.sort_by_key(fs::DirEntry::file_name);
+        for entry in entries {
+            fingerprint_shell_entry(&entry.path(), &archive.join(entry.file_name()), root, input)?;
+        }
+    }
+    Ok(())
+}
+
+fn render_host_shell_runtime(
+    shell: &ShellConfig,
+    aliases: &[String],
+    bins: &[String],
+    extracted: Option<&str>,
+) -> String {
+    let mut output = String::from("# Managed by sbxr from the protected shell profile.\n");
+    match shell.program {
+        ShellProgram::Bash | ShellProgram::Zsh => {
+            for directory in bins {
+                let path = mirrored_shell_expression(directory);
+                output.push_str(&format!(
+                    "__sbxr_path={path}; if [ -d \"$__sbxr_path\" ]; then case \":$PATH:\" in *\":$__sbxr_path:\"*) ;; *) PATH=\"$PATH:$__sbxr_path\"; export PATH ;; esac; fi; unset __sbxr_path\n"
+                ));
+            }
+            if let Some(path) = extracted {
+                output.push_str(&format!(
+                    "[ -f {} ] && . {} || true\n",
+                    shell_home_expression(path),
+                    shell_home_expression(path)
+                ));
+            }
+            for path in aliases {
+                output.push_str(&format!(
+                    "[ -f {} ] && . {} || true\n",
+                    mirrored_shell_expression(path),
+                    mirrored_shell_expression(path)
+                ));
+            }
+            if shell.prompt == PromptStyle::Plain {
+                match shell.program {
+                    ShellProgram::Bash => output.push_str("PS1='\\u@\\h:\\w\\$ '\n"),
+                    ShellProgram::Zsh => output.push_str("PROMPT='%n@%m:%~%# '\n"),
+                    ShellProgram::Fish => unreachable!(),
+                }
+            } else if let Some(path) = shell.prompt_file.as_deref() {
+                output.push_str(&format!(
+                    "[ -f {} ] && . {} || true\n",
+                    mirrored_shell_expression(path),
+                    mirrored_shell_expression(path)
+                ));
+            }
+        }
+        ShellProgram::Fish => {
+            for directory in bins {
+                let path = mirrored_shell_expression(directory);
+                output.push_str(&format!(
+                    "set -l __sbxr_path {path}; if test -d \"$__sbxr_path\"; if not contains -- \"$__sbxr_path\" $PATH; set -gx PATH $PATH \"$__sbxr_path\"; end; end\n"
+                ));
+            }
+            if let Some(path) = extracted {
+                output.push_str(&format!(
+                    "if test -f {}; source {}; end\n",
+                    shell_home_expression(path),
+                    shell_home_expression(path)
+                ));
+            }
+            for path in aliases {
+                output.push_str(&format!(
+                    "if test -f {}; source {}; end\n",
+                    mirrored_shell_expression(path),
+                    mirrored_shell_expression(path)
+                ));
+            }
+            if shell.prompt == PromptStyle::Plain {
+                output.push_str("function fish_prompt; printf '%s@%s:%s> ' $USER (prompt_hostname) (prompt_pwd); end\n");
+            } else if let Some(path) = shell.prompt_file.as_deref() {
+                output.push_str(&format!(
+                    "if test -f {}; source {}; end\n",
+                    mirrored_shell_expression(path),
+                    mirrored_shell_expression(path)
+                ));
+            }
+        }
+    }
+    output
+}
+
+fn shell_home_expression(relative: &str) -> String {
+    format!("\"$HOME\"/{}", shell_single_quote(relative))
+}
+
+fn mirrored_shell_expression(relative: &str) -> String {
+    shell_home_expression(&format!("{HOST_SHELL_MIRROR_RELATIVE}/{relative}"))
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn existing(home: &Path, paths: &'static [&'static str]) -> impl Iterator<Item = PathBuf> {
@@ -661,10 +1437,49 @@ fn stream_tree(
     home_text: &str,
     selected: &[PathBuf],
 ) -> Result<(), String> {
+    stream_tree_with_policy(
+        sandbox_name,
+        preserve_xdg_state,
+        home,
+        home_text,
+        selected,
+        MirrorPolicy::capabilities(),
+        "/home/agent",
+    )
+}
+
+fn stream_shell_tree(
+    sandbox_name: &str,
+    preserve_xdg_state: bool,
+    home: &Path,
+    home_text: &str,
+    selected: &[PathBuf],
+    destination: &str,
+) -> Result<(), String> {
+    stream_tree_with_policy(
+        sandbox_name,
+        preserve_xdg_state,
+        home,
+        home_text,
+        selected,
+        MirrorPolicy::host_shell(),
+        destination,
+    )
+}
+
+fn stream_tree_with_policy(
+    sandbox_name: &str,
+    preserve_xdg_state: bool,
+    home: &Path,
+    home_text: &str,
+    selected: &[PathBuf],
+    policy: MirrorPolicy,
+    destination: &str,
+) -> Result<(), String> {
     let mut child = sbx::exec_command(preserve_xdg_state)
         .arg("-i")
         .arg(sandbox_name)
-        .args(["tar", "-xf", "-", "-C", "/home/agent"])
+        .args(["tar", "-xf", "-", "-C", destination])
         .stdin(Stdio::piped())
         .spawn()
         .map_err(|error| format!("could not start remote capability extraction: {error}"))?;
@@ -673,7 +1488,10 @@ fn stream_tree(
             .stdin
             .as_mut()
             .ok_or("remote capability extraction stdin was unavailable")?;
-        let mut archive = TarWriter::new(output);
+        let mut archive = TarWriter::with_policy(output, policy);
+        if policy.rewrite_into_shell_mirror {
+            archive.shell_mirror = selected.to_vec();
+        }
         for relative in selected {
             archive.append_tree(&home.join(relative), relative, home_text)?;
         }
@@ -1107,16 +1925,62 @@ pub(crate) fn upload_file(
 
 const MAX_SYMLINK_DEREFERENCE_DEPTH: u32 = 32;
 
+#[derive(Clone, Copy)]
+struct MirrorPolicy {
+    follow_external_symlinks: bool,
+    skip_any_git: bool,
+    rewrite_into_shell_mirror: bool,
+}
+
+impl MirrorPolicy {
+    fn capabilities() -> Self {
+        Self {
+            follow_external_symlinks: true,
+            skip_any_git: false,
+            rewrite_into_shell_mirror: false,
+        }
+    }
+
+    fn host_shell() -> Self {
+        Self {
+            follow_external_symlinks: false,
+            skip_any_git: true,
+            rewrite_into_shell_mirror: true,
+        }
+    }
+}
+
 struct TarWriter<'a, W: Write> {
     output: &'a mut W,
     root: PathBuf,
+    policy: MirrorPolicy,
+    /// Selections that live under the host-shell mirror root; host paths that
+    /// reference them are rewritten to the mirror instead of `/home/agent`.
+    shell_mirror: Vec<PathBuf>,
+    archive_root: PathBuf,
 }
 
 impl<'a, W: Write> TarWriter<'a, W> {
+    #[cfg(test)]
     fn new(output: &'a mut W) -> Self {
+        Self::with_policy(output, MirrorPolicy::capabilities())
+    }
+
+    fn with_policy(output: &'a mut W, policy: MirrorPolicy) -> Self {
         Self {
             output,
             root: PathBuf::new(),
+            policy,
+            shell_mirror: Vec::new(),
+            archive_root: PathBuf::new(),
+        }
+    }
+
+    fn rewrite(&self, text: &str, host_home: &str) -> String {
+        if self.policy.rewrite_into_shell_mirror {
+            rewrite_shell_paths(text, host_home, &self.shell_mirror)
+        } else {
+            text.replace(host_home, "/home/agent")
         }
     }
 
@@ -1130,6 +1994,13 @@ impl<'a, W: Write> TarWriter<'a, W> {
         host_home: &str,
     ) -> Result<(), String> {
         self.root = fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
+        self.archive_root = archive.to_path_buf();
+        if self.policy.rewrite_into_shell_mirror {
+            // A symlinked shell selection is mirrored by content: the guest has
+            // no copy of the host path the link names.
+            let root = self.root.clone();
+            return self.append(&root, archive, host_home, 0);
+        }
         self.append(source, archive, host_home, 0)
     }
 
@@ -1142,7 +2013,7 @@ impl<'a, W: Write> TarWriter<'a, W> {
     ) -> Result<(), String> {
         let metadata = fs::symlink_metadata(source)
             .map_err(|error| format!("could not inspect {}: {error}", source.display()))?;
-        if should_skip(archive) {
+        if should_skip(archive, self.policy.skip_any_git) {
             return Ok(());
         }
         if metadata.file_type().is_symlink() {
@@ -1151,6 +2022,14 @@ impl<'a, W: Write> TarWriter<'a, W> {
                 return Ok(());
             };
             if !resolved.starts_with(&self.root) {
+                if !self.policy.follow_external_symlinks {
+                    eprintln!(
+                        "warning: skipped host shell symlink that leaves its selected tree: {} -> {}",
+                        source.display(),
+                        resolved.display()
+                    );
+                    return Ok(());
+                }
                 // A link that leaves this mirrored tree has no valid sandbox-side
                 // target, so copy what it points at under the link's own name.
                 if depth >= MAX_SYMLINK_DEREFERENCE_DEPTH {
@@ -1161,9 +2040,22 @@ impl<'a, W: Write> TarWriter<'a, W> {
                 }
                 return self.append(&resolved, archive, host_home, depth + 1);
             }
-            let target = fs::read_link(source)
-                .map_err(|error| format!("could not read symlink {}: {error}", source.display()))?;
-            let target = target.to_string_lossy().replace(host_home, "/home/agent");
+            let target = if self.policy.rewrite_into_shell_mirror {
+                // Emit in-tree links relative to the link itself, computed from
+                // the resolved target. That keeps them valid at any mirror
+                // root, short enough for ustar's 100-byte link field, and
+                // correct even when the host home is itself reached via a link.
+                let inside = resolved.strip_prefix(&self.root).unwrap_or(Path::new(""));
+                relative_link(
+                    archive.parent().unwrap_or(Path::new("")),
+                    &self.archive_root.join(inside),
+                )
+            } else {
+                let target = fs::read_link(source).map_err(|error| {
+                    format!("could not read symlink {}: {error}", source.display())
+                })?;
+                self.rewrite(&target.to_string_lossy(), host_home)
+            };
             self.header(archive, &metadata, 0, b'2', Some(&target))?;
         } else if metadata.is_dir() {
             self.header(archive, &metadata, 0, b'5', None)?;
@@ -1186,7 +2078,7 @@ impl<'a, W: Write> TarWriter<'a, W> {
                 .and_then(|mut file| file.read_to_end(&mut contents))
                 .map_err(|error| format!("could not read {}: {error}", source.display()))?;
             if let Ok(text) = std::str::from_utf8(&contents) {
-                contents = text.replace(host_home, "/home/agent").into_bytes();
+                contents = self.rewrite(text, host_home).into_bytes();
             }
             self.header(archive, &metadata, contents.len() as u64, b'0', None)?;
             self.output
@@ -1251,12 +2143,36 @@ impl<'a, W: Write> TarWriter<'a, W> {
     }
 }
 
-fn should_skip(path: &Path) -> bool {
+/// Relative symlink text that reaches `target` from directory `from`; both are
+/// archive paths below the same extraction root.
+fn relative_link(from: &Path, target: &Path) -> String {
+    let from = from.components().collect::<Vec<_>>();
+    let target = target.components().collect::<Vec<_>>();
+    let common = from
+        .iter()
+        .zip(&target)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut parts = vec![".."; from.len() - common];
+    let rest = target[common..]
+        .iter()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    parts.extend(rest.iter().map(String::as_str));
+    if parts.is_empty() {
+        ".".to_owned()
+    } else {
+        parts.join("/")
+    }
+}
+
+fn should_skip(path: &Path, skip_any_git: bool) -> bool {
     let text = path.to_string_lossy().replace('\\', "/");
     text == ".codex/skills/.system"
         || text.starts_with(".codex/skills/.system/")
         || text == "bin/.git"
         || text.starts_with("bin/.git/")
+        || (skip_any_git && text.split('/').any(|component| component == ".git"))
         || text.contains("/.remote-plugin-install-staging")
 }
 
@@ -1301,6 +2217,125 @@ fn mode(metadata: &fs::Metadata) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_shell_lock_serializes_reconciliation_and_cleans_up() {
+        use std::sync::mpsc;
+        use std::time::{Duration, SystemTime};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "sbxr-host-shell-lock-{}-{unique}",
+            std::process::id()
+        ));
+        let first = HostShellLock::acquire(&root, "sandbox").unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let contender_root = root.clone();
+        let contender = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let _lock = HostShellLock::acquire(&contender_root, "sandbox").unwrap();
+            acquired_tx.send(()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            acquired_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err()
+        );
+        drop(first);
+        acquired_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        contender.join().unwrap();
+        assert_eq!(fs::read_dir(root.join("locks")).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn host_shell_lock_retries_an_empty_initializing_file() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "sbxr-host-shell-empty-lock-{}-{unique}",
+            std::process::id()
+        ));
+        let directory = root.join("locks");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(format!("host-shell-{}.lock", sha256::hex(b"sandbox")));
+        fs::write(&path, b"").unwrap();
+        assert_eq!(
+            host_shell_lock_state(&path, HOST_SHELL_LOCK_INITIALIZATION_GRACE).unwrap(),
+            HostShellLockState::Initializing
+        );
+        assert_eq!(
+            host_shell_lock_state(&path, Duration::ZERO).unwrap(),
+            HostShellLockState::Stale
+        );
+
+        let contender_path = path.clone();
+        let remover = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            fs::remove_file(contender_path).unwrap();
+        });
+        let lock = HostShellLock::acquire(&root, "sandbox").unwrap();
+        remover.join().unwrap();
+        drop(lock);
+
+        fs::write(&path, b"not-a-pid\n").unwrap();
+        assert!(host_shell_lock_state(&path, HOST_SHELL_LOCK_INITIALIZATION_GRACE).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn host_shell_install_restores_the_previous_mirror_on_failure() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "sbxr-host-shell-install-{}-{unique}",
+            std::process::id()
+        ));
+        let root = directory.join("mirror");
+        let staging = directory.join("staging");
+        let backup = directory.join("backup");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("content"), b"previous").unwrap();
+
+        let failed = Command::new("sh")
+            .args(["-c", INSTALL_HOST_SHELL_MIRROR, "sh"])
+            .arg(&root)
+            .arg(&staging)
+            .arg(&backup)
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(!failed.success());
+        assert_eq!(fs::read(root.join("content")).unwrap(), b"previous");
+        assert!(!backup.exists());
+
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("content"), b"replacement").unwrap();
+        let installed = Command::new("sh")
+            .args(["-c", INSTALL_HOST_SHELL_MIRROR, "sh"])
+            .arg(&root)
+            .arg(&staging)
+            .arg(&backup)
+            .status()
+            .unwrap();
+        assert!(installed.success());
+        assert_eq!(fs::read(root.join("content")).unwrap(), b"replacement");
+        assert!(!backup.exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1357,6 +2392,41 @@ mod tests {
         assert_eq!(entries.get("tree/broken-link"), None);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn host_shell_mirror_skips_links_that_leave_the_selected_tree() {
+        use std::os::unix::fs::symlink;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "sbxr-secure-shell-symlink-{}-{unique}",
+            std::process::id()
+        ));
+        let tree = root.join("bin");
+        fs::create_dir_all(&tree).unwrap();
+        fs::write(root.join("secret"), b"do not copy").unwrap();
+        symlink(root.join("secret"), tree.join("escaping-link")).unwrap();
+
+        let mut buffer = Vec::new();
+        {
+            let mut archive = TarWriter::with_policy(&mut buffer, MirrorPolicy::host_shell());
+            archive
+                .append_tree(&tree, Path::new("bin"), &root.to_string_lossy())
+                .unwrap();
+            archive.finish().unwrap();
+        }
+        assert!(
+            !buffer
+                .windows(b"do not copy".len())
+                .any(|value| value == b"do not copy")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn keeps_only_alias_definitions_from_the_host_bashrc() {
         let bashrc = concat!(
@@ -1369,7 +2439,7 @@ mod tests {
             "source /host/only/tool.sh\n",
         );
         assert_eq!(
-            bashrc_alias_lines(bashrc),
+            shell_alias_lines(bashrc),
             concat!(
                 "alias ll='ls -alF'\n",
                 "  alias grep='grep --color=auto'\n",
@@ -1377,7 +2447,560 @@ mod tests {
                 "  two'\n",
             )
         );
-        assert!(bashrc_alias_lines("export PATH=/host\n").is_empty());
+        assert!(shell_alias_lines("export PATH=/host\n").is_empty());
+    }
+
+    #[test]
+    fn fish_alias_extraction_keeps_only_top_level_one_line_aliases() {
+        let config = concat!(
+            "alias ll 'ls -la'\n",
+            "function nested\n",
+            "  alias private 'echo no'\n",
+            "end\n",
+            "set -gx PATH /host/bin $PATH\n",
+        );
+        assert_eq!(fish_alias_lines(config), "alias ll 'ls -la'\n");
+    }
+
+    #[test]
+    fn renders_shell_specific_runtime_overlays() {
+        let bash = ShellConfig {
+            alias_files: vec![".config/custom aliases".to_owned()],
+            bin_dirs: vec!["scripts".to_owned()],
+            prompt: PromptStyle::Plain,
+            ..ShellConfig::default()
+        };
+        let rendered = render_host_shell_runtime(&bash, &bash.alias_files, &bash.bin_dirs, None);
+        assert!(rendered.contains("$HOME\"/'.local/share/sbxr/host-shell/scripts'"));
+        assert!(rendered.contains(".config/custom aliases"));
+        assert!(rendered.contains("PS1="));
+
+        let fish = ShellConfig {
+            program: ShellProgram::Fish,
+            prompt: PromptStyle::Plain,
+            ..ShellConfig::default()
+        };
+        let aliases = [
+            ".config/fish/conf.d/aliases.fish".to_owned(),
+            ".config/fish/manual-aliases.fish".to_owned(),
+        ];
+        let rendered = render_host_shell_runtime(&fish, &aliases, &[], None);
+        assert!(rendered.contains("function fish_prompt"));
+        assert!(!rendered.contains("PS1="));
+        // Mirrored files live outside ~/.config/fish, so fish never
+        // auto-sources them; the runtime overlay must source each one.
+        assert!(rendered.contains("host-shell/.config/fish/conf.d/aliases.fish"));
+        assert!(rendered.contains("manual-aliases.fish"));
+
+        let minimal = ShellConfig {
+            profile: ShellProfile::Minimal,
+            prompt: PromptStyle::Plain,
+            ..ShellConfig::default()
+        };
+        let rendered = render_host_shell_runtime(&minimal, &[], &[], None);
+        assert!(!rendered.contains("__sbxr_path"));
+        assert!(!rendered.contains("host-aliases"));
+        assert!(!rendered.contains(".bash_aliases"));
+    }
+
+    #[test]
+    fn familiar_inputs_are_shell_specific_and_content_sensitive() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home =
+            std::env::temp_dir().join(format!("sbxr-shell-inputs-{}-{unique}", std::process::id()));
+        fs::create_dir_all(home.join(".config/fish/conf.d")).unwrap();
+        fs::create_dir_all(home.join("bin")).unwrap();
+        fs::write(home.join(".bashrc"), b"alias b='echo bash'\n").unwrap();
+        fs::write(home.join(".bash_aliases"), b"alias bb='echo bash'\n").unwrap();
+        fs::write(home.join(".zshrc"), b"alias z='echo zsh'\n").unwrap();
+        fs::write(home.join(".zsh_aliases"), b"alias zz='echo zsh'\n").unwrap();
+        fs::write(
+            home.join(".config/fish/config.fish"),
+            b"alias f 'echo fish'\n",
+        )
+        .unwrap();
+        fs::write(
+            home.join(".config/fish/conf.d/aliases.fish"),
+            b"alias ff 'echo fish'\n",
+        )
+        .unwrap();
+        fs::write(home.join("bin/tool"), b"one").unwrap();
+        let state = std::env::temp_dir().join("sbxr-state-outside-test-home");
+
+        for (program, expected) in [
+            (ShellProgram::Bash, ".bash_aliases"),
+            (ShellProgram::Zsh, ".zsh_aliases"),
+            (ShellProgram::Fish, ".config/fish/conf.d/aliases.fish"),
+        ] {
+            let shell = ShellConfig {
+                program,
+                ..ShellConfig::default()
+            };
+            let inputs = host_shell_inputs(&shell, &home, &home.to_string_lossy(), &state).unwrap();
+            assert_eq!(inputs.alias_files, [expected]);
+            assert_eq!(inputs.bin_dirs, ["bin"]);
+            assert!(inputs.extracted_aliases.is_some());
+        }
+
+        let shell = ShellConfig::default();
+        let first_inputs =
+            host_shell_inputs(&shell, &home, &home.to_string_lossy(), &state).unwrap();
+        let first = host_shell_profile_digest(&shell, &first_inputs, "", &home).unwrap();
+        fs::write(home.join("bin/tool"), b"changed-size").unwrap();
+        let second_inputs =
+            host_shell_inputs(&shell, &home, &home.to_string_lossy(), &state).unwrap();
+        let second = host_shell_profile_digest(&shell, &second_inputs, "", &home).unwrap();
+        assert_ne!(first, second);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn familiar_external_symlinks_are_skipped_but_custom_selections_fail() {
+        use std::os::unix::fs::symlink;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "sbxr-shell-external-defaults-{}-{unique}",
+            std::process::id()
+        ));
+        let home = root.join("home");
+        let outside = root.join("outside");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(outside.join("bin")).unwrap();
+        fs::write(outside.join("aliases"), b"alias safe='printf safe'\n").unwrap();
+        fs::write(outside.join("bin/tool"), b"#!/bin/sh\n").unwrap();
+        symlink(outside.join("aliases"), home.join(".bash_aliases")).unwrap();
+        symlink(outside.join("bin"), home.join("bin")).unwrap();
+        let state = root.join("state");
+
+        let familiar = host_shell_inputs(
+            &ShellConfig::default(),
+            &home,
+            &home.to_string_lossy(),
+            &state,
+        )
+        .unwrap();
+        assert!(familiar.alias_files.is_empty());
+        assert!(familiar.bin_dirs.is_empty());
+        assert!(familiar.selected.is_empty());
+        assert_eq!(familiar.warnings.len(), 2);
+        assert!(
+            familiar
+                .warnings
+                .iter()
+                .all(|warning| warning.contains("automatically discovered"))
+        );
+
+        let custom = ShellConfig {
+            profile: ShellProfile::Custom,
+            alias_files: vec![".bash_aliases".to_owned()],
+            bin_dirs: vec!["bin".to_owned()],
+            ..ShellConfig::default()
+        };
+        let error = host_shell_inputs(&custom, &home, &home.to_string_lossy(), &state)
+            .err()
+            .expect("an explicit external selection must fail");
+        assert!(error.contains("outside the host home"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn custom_inputs_reject_missing_paths() {
+        let home = std::env::temp_dir().join(format!("sbxr-missing-shell-{}", std::process::id()));
+        fs::create_dir_all(&home).unwrap();
+        let shell = ShellConfig {
+            profile: ShellProfile::Custom,
+            alias_files: vec!["missing.aliases".to_owned()],
+            ..ShellConfig::default()
+        };
+        assert!(
+            host_shell_inputs(
+                &shell,
+                &home,
+                &home.to_string_lossy(),
+                Path::new("/tmp/outside-state")
+            )
+            .is_err()
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn rewrites_mirrored_host_paths_into_the_shell_mirror() {
+        let mirrored = [PathBuf::from("bin"), PathBuf::from(".bash_aliases")];
+        let text = concat!(
+            "alias t='/host/home/bin/tool'\n",
+            "alias u='~/bin/other' v=\"$HOME/bin\" w=${HOME}/bin/x\n",
+            "alias p='/host/home/projects/app'\n",
+            "alias q='/host/home/binaries/z' r='~/binx' s=a~/bin\n",
+            "/host/homeother/bin\n",
+        );
+        assert_eq!(
+            rewrite_shell_paths(text, "/host/home", &mirrored),
+            concat!(
+                "alias t='/home/agent/.local/share/sbxr/host-shell/bin/tool'\n",
+                "alias u='~/.local/share/sbxr/host-shell/bin/other' ",
+                "v=\"$HOME/.local/share/sbxr/host-shell/bin\" ",
+                "w=${HOME}/.local/share/sbxr/host-shell/bin/x\n",
+                "alias p='/home/agent/projects/app'\n",
+                "alias q='/home/agent/binaries/z' r='~/binx' s=a~/bin\n",
+                "/host/homeother/bin\n",
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_shell_archive_rewrites_contents_and_links_into_the_mirror() {
+        use std::os::unix::fs::symlink;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home = std::env::temp_dir().join(format!(
+            "sbxr-shell-mirror-rewrite-{}-{unique}",
+            std::process::id()
+        ));
+        let bin = home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let home_text = home.to_string_lossy().into_owned();
+        fs::write(bin.join("tool"), format!("exec {home_text}/bin/real\n")).unwrap();
+        fs::write(bin.join("real"), b"#!/bin/sh\n").unwrap();
+        symlink(bin.join("real"), bin.join("absolute-link")).unwrap();
+
+        let mut buffer = Vec::new();
+        {
+            let mut archive = TarWriter::with_policy(&mut buffer, MirrorPolicy::host_shell());
+            archive.shell_mirror = vec![PathBuf::from("bin")];
+            archive
+                .append_tree(&bin, Path::new("bin"), &home_text)
+                .unwrap();
+            archive.finish().unwrap();
+        }
+        let mirrored = b"/home/agent/.local/share/sbxr/host-shell/bin/real";
+        let occurrences = buffer
+            .windows(mirrored.len())
+            .filter(|window| *window == mirrored)
+            .count();
+        assert_eq!(occurrences, 1, "file contents point at the mirror");
+        // In-tree links are emitted relative to the link (see
+        // deep_in_tree_links_are_relative_and_extract_correctly).
+        assert!(buffer.windows(5).any(|window| window == b"real\0"));
+        assert!(
+            !buffer
+                .windows(home_text.len())
+                .any(|window| window == home_text.as_bytes())
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    fn scratch_home(label: &str) -> PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let home =
+            std::env::temp_dir().join(format!("sbxr-{label}-{}-{unique}", std::process::id()));
+        fs::create_dir_all(&home).unwrap();
+        // Canonical, so resolved-path checks compare like with like.
+        fs::canonicalize(home).unwrap()
+    }
+
+    fn shell_archive(home: &Path, selected: &[PathBuf]) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        {
+            let mut archive = TarWriter::with_policy(&mut buffer, MirrorPolicy::host_shell());
+            archive.shell_mirror = selected.to_vec();
+            for relative in selected {
+                archive
+                    .append_tree(&home.join(relative), relative, &home.to_string_lossy())
+                    .unwrap();
+            }
+            archive.finish().unwrap();
+        }
+        buffer
+    }
+
+    /// Extracts with the system `tar`, as the guest does.
+    fn extract(buffer: &[u8], destination: &Path) {
+        use std::process::{Command, Stdio};
+        fs::create_dir_all(destination).unwrap();
+        let mut child = Command::new("tar")
+            .args(["-xf", "-", "-C"])
+            .arg(destination)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(buffer).unwrap();
+        assert!(child.wait().unwrap().success(), "tar rejected the archive");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn familiar_profile_mirrors_symlinked_dotfiles_by_content() {
+        use std::os::unix::fs::symlink;
+        let home = scratch_home("dotfile-links");
+        fs::create_dir_all(home.join("dotfiles/bin")).unwrap();
+        fs::write(home.join("dotfiles/aliases"), b"alias ll='ls -l'\n").unwrap();
+        fs::write(home.join("dotfiles/bin/tool"), b"#!/bin/sh\n").unwrap();
+        symlink(home.join("dotfiles/aliases"), home.join(".bash_aliases")).unwrap();
+        symlink(home.join("dotfiles/bin"), home.join("bin")).unwrap();
+        let state = home.join("state");
+
+        let shell = ShellConfig::default();
+        let inputs = host_shell_inputs(&shell, &home, &home.to_string_lossy(), &state).unwrap();
+        assert_eq!(
+            inputs.selected,
+            [PathBuf::from(".bash_aliases"), PathBuf::from("bin")]
+        );
+        let digest = host_shell_profile_digest(&shell, &inputs, "", &home).unwrap();
+        fs::write(home.join("dotfiles/bin/tool"), b"#!/bin/sh\necho changed\n").unwrap();
+        let changed = host_shell_profile_digest(&shell, &inputs, "", &home).unwrap();
+        assert_ne!(
+            digest, changed,
+            "a link target's contents must be fingerprinted"
+        );
+
+        let out = home.join("extracted");
+        extract(&shell_archive(&home, &inputs.selected), &out);
+        let aliases = out.join(".bash_aliases");
+        assert!(
+            !fs::symlink_metadata(&aliases)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(aliases).unwrap(), b"alias ll='ls -l'\n");
+        assert!(out.join("bin/tool").is_file());
+        assert!(
+            !fs::symlink_metadata(out.join("bin"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_links_in_a_mirrored_directory_do_not_block_launch() {
+        use std::os::unix::fs::symlink;
+        let home = scratch_home("dangling-link");
+        fs::create_dir_all(home.join("bin")).unwrap();
+        fs::write(home.join("bin/tool"), b"#!/bin/sh\n").unwrap();
+        symlink(home.join("bin/removed"), home.join("bin/stale")).unwrap();
+        let shell = ShellConfig::default();
+        let inputs =
+            host_shell_inputs(&shell, &home, &home.to_string_lossy(), &home.join("s")).unwrap();
+        host_shell_profile_digest(&shell, &inputs, "", &home).unwrap();
+        let out = home.join("extracted");
+        extract(&shell_archive(&home, &inputs.selected), &out);
+        assert!(out.join("bin/tool").is_file());
+        assert!(fs::symlink_metadata(out.join("bin/stale")).is_err());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_only_changes_refresh_the_mirror() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = scratch_home("chmod");
+        fs::create_dir_all(home.join("bin")).unwrap();
+        let tool = home.join("bin/tool");
+        fs::write(&tool, b"#!/bin/sh\n").unwrap();
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o644)).unwrap();
+        let shell = ShellConfig::default();
+        let inputs =
+            host_shell_inputs(&shell, &home, &home.to_string_lossy(), &home.join("s")).unwrap();
+        let before = host_shell_profile_digest(&shell, &inputs, "", &home).unwrap();
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+        let after = host_shell_profile_digest(&shell, &inputs, "", &home).unwrap();
+        assert_ne!(before, after);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn rendered_overlay_is_part_of_the_digest() {
+        let home = scratch_home("runtime-digest");
+        let shell = ShellConfig::default();
+        let inputs =
+            host_shell_inputs(&shell, &home, &home.to_string_lossy(), &home.join("s")).unwrap();
+        assert_ne!(
+            host_shell_profile_digest(&shell, &inputs, "PATH=a", &home).unwrap(),
+            host_shell_profile_digest(&shell, &inputs, "PATH=b", &home).unwrap()
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_cannot_smuggle_credential_stores_into_the_mirror() {
+        use std::os::unix::fs::symlink;
+        let home = scratch_home("credential-links");
+        let state = home.join("state");
+        fs::create_dir_all(home.join("dotfiles/ssh")).unwrap();
+        fs::write(home.join("dotfiles/ssh/id_ed25519"), b"secret").unwrap();
+        symlink(home.join("dotfiles/ssh"), home.join(".ssh")).unwrap();
+        fs::create_dir_all(home.join(".aws")).unwrap();
+        fs::write(home.join(".aws/credentials"), b"secret").unwrap();
+        symlink(home.join(".aws"), home.join("link")).unwrap();
+        symlink(home.join(".aws"), home.join("aws-tools")).unwrap();
+
+        let custom = |aliases: Vec<&str>, bins: Vec<&str>| ShellConfig {
+            profile: ShellProfile::Custom,
+            alias_files: aliases.into_iter().map(str::to_owned).collect(),
+            bin_dirs: bins.into_iter().map(str::to_owned).collect(),
+            ..ShellConfig::default()
+        };
+        let text = home.to_string_lossy();
+        // A directory that contains the resolved target of ~/.ssh.
+        assert!(
+            host_shell_inputs(&custom(vec![], vec!["dotfiles"]), &home, &text, &state).is_err()
+        );
+        // A file reached through a symlinked intermediate component.
+        assert!(
+            host_shell_inputs(
+                &custom(vec!["link/credentials"], vec![]),
+                &home,
+                &text,
+                &state
+            )
+            .is_err()
+        );
+        // A top-level symlink straight to a store.
+        assert!(
+            host_shell_inputs(&custom(vec![], vec!["aws-tools"]), &home, &text, &state).is_err()
+        );
+        // An unrelated directory beside them stays allowed.
+        fs::create_dir_all(home.join("dotfiles-bin")).unwrap();
+        assert!(
+            host_shell_inputs(&custom(vec![], vec!["dotfiles-bin"]), &home, &text, &state).is_ok()
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deep_in_tree_links_are_relative_and_extract_correctly() {
+        use std::os::unix::fs::symlink;
+        let home = scratch_home("deep-links");
+        let deep = "tools/some-long-vendor-name/versions/1.2.3-with-a-long-suffix/linux-x86_64/bin";
+        fs::create_dir_all(home.join("bin").join(deep)).unwrap();
+        let target = home.join("bin").join(deep).join("real-tool");
+        fs::write(&target, b"#!/bin/sh\necho real\n").unwrap();
+        // Absolute host link; rewritten with the 40-byte mirror prefix it
+        // would exceed ustar's 100-byte link field.
+        symlink(&target, home.join("bin/tool")).unwrap();
+        symlink(
+            Path::new(deep).join("real-tool"),
+            home.join("bin/relative-tool"),
+        )
+        .unwrap();
+        assert!(
+            format!("/home/agent/.local/share/sbxr/host-shell/bin/{deep}/real-tool").len() > 100
+        );
+
+        let selected = [PathBuf::from("bin")];
+        let out = home.join("extracted");
+        extract(&shell_archive(&home, &selected), &out);
+        for link in ["bin/tool", "bin/relative-tool"] {
+            let text = fs::read_link(out.join(link)).unwrap();
+            assert!(text.is_relative(), "{link} -> {}", text.display());
+            assert_eq!(
+                fs::read(out.join(link)).unwrap(),
+                b"#!/bin/sh\necho real\n",
+                "{link} must resolve inside the extracted mirror"
+            );
+        }
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn computes_relative_link_text() {
+        assert_eq!(relative_link(Path::new("bin"), Path::new("bin/a/b")), "a/b");
+        assert_eq!(
+            relative_link(Path::new("bin/a"), Path::new("bin/c")),
+            "../c"
+        );
+        assert_eq!(relative_link(Path::new("bin/a"), Path::new("bin/a")), ".");
+        assert_eq!(relative_link(Path::new(""), Path::new(".x")), ".x");
+    }
+
+    #[test]
+    fn rewrites_quoted_home_and_respects_left_boundaries() {
+        let mirrored = [PathBuf::from("bin")];
+        let text = concat!(
+            "a=\"$HOME\"/bin/x b=\"${HOME}\"/bin/y\n",
+            "c=/data/home/u/bin/z d=\\$HOME/bin/w\n",
+            "e=$HOME/bin\n",
+        );
+        assert_eq!(
+            rewrite_shell_paths(text, "/home/u", &mirrored),
+            concat!(
+                "a=\"$HOME\"/.local/share/sbxr/host-shell/bin/x ",
+                "b=\"${HOME}\"/.local/share/sbxr/host-shell/bin/y\n",
+                "c=/data/home/u/bin/z d=\\$HOME/bin/w\n",
+                "e=$HOME/.local/share/sbxr/host-shell/bin\n",
+            )
+        );
+    }
+
+    #[test]
+    fn generated_overlays_parse_in_their_shells() {
+        use std::process::Command;
+        let aliases = vec![".config/it's aliases".to_owned()];
+        let bins = vec!["bin".to_owned(), "my tools".to_owned()];
+        for (program, binary) in [
+            (ShellProgram::Bash, "bash"),
+            (ShellProgram::Zsh, "zsh"),
+            (ShellProgram::Fish, "fish"),
+        ] {
+            if Command::new(binary).arg("--version").output().is_err() {
+                eprintln!("skipping {binary}: not installed");
+                continue;
+            }
+            for prompt in [
+                PromptStyle::Classic,
+                PromptStyle::Plain,
+                PromptStyle::Custom,
+            ] {
+                let shell = ShellConfig {
+                    program,
+                    prompt,
+                    prompt_file: (prompt == PromptStyle::Custom)
+                        .then(|| ".config/sbxr/prompt".to_owned()),
+                    ..ShellConfig::default()
+                };
+                let rendered = render_host_shell_runtime(
+                    &shell,
+                    &aliases,
+                    &bins,
+                    Some(".config/sbxr/host-aliases.bash"),
+                );
+                let output = Command::new(binary)
+                    .args(["-n", "-c", &rendered])
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{binary} rejected the overlay:\n{rendered}\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
     }
 
     #[test]

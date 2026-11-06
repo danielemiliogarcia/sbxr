@@ -1,0 +1,50 @@
+# syntax=docker/sandbox-kit:3
+schemaVersion: "3"
+kind: mixin
+version: "1.0.1"
+displayName: Zsh login shell
+description: Installs Zsh and selects it as the agent login shell with sbxr prompt and host-overlay hooks.
+sourceUrl: https://github.com/danielemiliogarcia/sbxr
+
+capabilities:
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      install:
+        allow:
+          - deb.debian.org
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      install:
+        - command: |
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+            # zsh's postinst runs add-shell, which fails when the minimal agent
+            # workload ships without /etc/shells (same seed as fish-shell).
+            if [ ! -e /etc/shells ]; then
+              printf '%s\n' /bin/sh /bin/bash > /etc/shells
+            fi
+            rm -f /etc/shells.tmp
+            apt-get update
+            apt-get install -y --no-install-recommends zsh
+            rm -rf /var/lib/apt/lists/*
+            usermod -s /usr/bin/zsh agent
+            mkdir -p /home/agent/.config/sbxr
+            cat > /home/agent/.config/sbxr/zsh-prompt.zsh <<'SBXR_PROMPT'
+            autoload -Uz colors && colors
+            setopt prompt_subst
+            __sbxr_zsh_git_branch() {
+              local branch
+              branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || \
+                branch=$(git rev-parse --short HEAD 2>/dev/null) || return 0
+              print -n " ($branch)"
+            }
+            PROMPT='%F{green}%n@%m%f:%F{blue}%~%F{yellow}$(__sbxr_zsh_git_branch)%f%# '
+            SBXR_PROMPT
+            cat > /home/agent/.zshrc <<'SBXR_ZSHRC'
+            autoload -Uz compinit && compinit
+            [ -f "$HOME/.config/sbxr/zsh-prompt.zsh" ] && source "$HOME/.config/sbxr/zsh-prompt.zsh"
+            [ -f "$HOME/.config/sbxr/host-shell-runtime.zsh" ] && source "$HOME/.config/sbxr/host-shell-runtime.zsh"
+            SBXR_ZSHRC
+            chown -R agent:agent /home/agent/.config/sbxr /home/agent/.zshrc
+          user: "0"
+          description: Install and configure the Zsh login shell

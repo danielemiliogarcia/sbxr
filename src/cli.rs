@@ -1,4 +1,6 @@
-use crate::profile::{NetworkProfile, Overrides, WorkspaceMode};
+use crate::profile::{
+    NetworkProfile, Overrides, PromptStyle, ShellProfile, ShellProgram, WorkspaceMode,
+};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -139,6 +141,33 @@ impl Cli {
                 "--no-ghcr" => profile.ghcr = Some(false),
                 "--paseo-relay" => profile.paseo_relay = Some(true),
                 "--no-paseo-relay" => profile.paseo_relay = Some(false),
+                "--shell-profile" => {
+                    let value = consume_next("--shell-profile")?;
+                    profile.shell_profile = Some(ShellProfile::parse(&value.to_string_lossy())?);
+                }
+                "--login-shell" => {
+                    let value = consume_next("--login-shell")?;
+                    profile.shell_program = Some(ShellProgram::parse(&value.to_string_lossy())?);
+                }
+                "--prompt" => {
+                    let value = consume_next("--prompt")?;
+                    profile.prompt = Some(PromptStyle::parse(&value.to_string_lossy())?);
+                }
+                "--prompt-file" => {
+                    let value = consume_next("--prompt-file")?;
+                    profile.prompt_file = Some(crate::profile::normalize_home_path(
+                        &value.to_string_lossy(),
+                        "--prompt-file",
+                    )?);
+                }
+                "--alias-file" => {
+                    let value = consume_next("--alias-file")?;
+                    push_home_path(&mut profile.alias_files, &value, "--alias-file")?;
+                }
+                "--bin-dir" => {
+                    let value = consume_next("--bin-dir")?;
+                    push_home_path(&mut profile.bin_dirs, &value, "--bin-dir")?;
+                }
                 _ if text.starts_with("--preset=") => {
                     preset = Preset::parse(OsStr::new(text.trim_start_matches("--preset=")))?;
                 }
@@ -178,6 +207,35 @@ impl Cli {
                         text.trim_start_matches("--network="),
                     )?)
                 }
+                _ if text.starts_with("--shell-profile=") => {
+                    profile.shell_profile = Some(ShellProfile::parse(
+                        text.trim_start_matches("--shell-profile="),
+                    )?)
+                }
+                _ if text.starts_with("--login-shell=") => {
+                    profile.shell_program = Some(ShellProgram::parse(
+                        text.trim_start_matches("--login-shell="),
+                    )?)
+                }
+                _ if text.starts_with("--prompt=") => {
+                    profile.prompt = Some(PromptStyle::parse(text.trim_start_matches("--prompt="))?)
+                }
+                _ if text.starts_with("--prompt-file=") => {
+                    profile.prompt_file = Some(crate::profile::normalize_home_path(
+                        text.trim_start_matches("--prompt-file="),
+                        "--prompt-file",
+                    )?)
+                }
+                _ if text.starts_with("--alias-file=") => push_home_path_text(
+                    &mut profile.alias_files,
+                    text.trim_start_matches("--alias-file="),
+                    "--alias-file",
+                )?,
+                _ if text.starts_with("--bin-dir=") => push_home_path_text(
+                    &mut profile.bin_dirs,
+                    text.trim_start_matches("--bin-dir="),
+                    "--bin-dir",
+                )?,
                 _ => filtered.push(argument.clone()),
             }
             index += 1;
@@ -210,6 +268,21 @@ fn parse_cpus(value: &str) -> Result<u32, String> {
         .ok()
         .filter(|value| *value > 0)
         .ok_or_else(|| "--cpus requires a positive integer".to_owned())
+}
+
+fn push_home_path(paths: &mut Vec<String>, value: &OsStr, label: &str) -> Result<(), String> {
+    push_home_path_text(paths, &value.to_string_lossy(), label)
+}
+
+fn push_home_path_text(paths: &mut Vec<String>, value: &str, label: &str) -> Result<(), String> {
+    let value = crate::profile::normalize_home_path(value, label)?;
+    if paths.len() >= 32 {
+        return Err(format!("{label} accepts at most 32 paths"));
+    }
+    if !paths.contains(&value) {
+        paths.push(value);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -265,6 +338,11 @@ pub(crate) struct AuthRenewRequest {
     pub(crate) path: Option<PathBuf>,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct SetupRequest {
+    pub(crate) prebuild: bool,
+}
+
 #[derive(Debug)]
 pub(crate) enum Action {
     New(Option<PathBuf>),
@@ -294,7 +372,7 @@ pub(crate) enum Action {
     Status(Option<PathBuf>),
     Stop(Option<PathBuf>),
     Remove { path: Option<PathBuf>, force: bool },
-    Setup,
+    Setup(SetupRequest),
     Doctor(Option<PathBuf>),
     Version,
     Help,
@@ -306,15 +384,17 @@ impl Action {
             return Ok(Self::New(None));
         }
         let command = arguments[0].to_string_lossy();
+        if command == "setup" {
+            return Self::parse_setup(&arguments[1..]);
+        }
         if matches!(
             command.as_ref(),
-            "setup" | "help" | "-h" | "--help" | "-V" | "--version"
+            "help" | "-h" | "--help" | "-V" | "--version"
         ) {
             if arguments.len() != 1 {
                 return Err(format!("{command} does not accept arguments"));
             }
             return Ok(match command.as_ref() {
-                "setup" => Self::Setup,
                 "-V" | "--version" => Self::Version,
                 _ => Self::Help,
             });
@@ -363,6 +443,22 @@ impl Action {
             _ if arguments.len() == 1 => Self::New(Some(PathBuf::from(&arguments[0]))),
             _ => return Err(format!("unknown command: {command}")),
         })
+    }
+
+    fn parse_setup(arguments: &[OsString]) -> Result<Self, String> {
+        let mut prebuild = false;
+        for argument in arguments {
+            match argument.to_string_lossy().as_ref() {
+                "--prebuild" => {
+                    if prebuild {
+                        return Err("setup accepts --prebuild only once".to_owned());
+                    }
+                    prebuild = true;
+                }
+                value => return Err(format!("unknown setup option: {value}")),
+            }
+        }
+        Ok(Self::Setup(SetupRequest { prebuild }))
     }
 
     fn parse_auth(arguments: &[OsString]) -> Result<Self, String> {
@@ -526,7 +622,7 @@ impl Action {
             Self::CommitPgpSign(request) => request.path.as_deref(),
             Self::Remove { path, .. } => path.as_deref(),
             Self::Doctor(path) => path.as_deref(),
-            Self::Setup | Self::Version | Self::Help => None,
+            Self::Setup(_) | Self::Version | Self::Help => None,
         }
     }
 
@@ -559,7 +655,7 @@ impl Action {
             Self::Inspect(_)
             | Self::Profile(_)
             | Self::Name(_)
-            | Self::Setup
+            | Self::Setup(_)
             | Self::Doctor(_)
             | Self::Diagnose(_)
             | Self::Version
@@ -647,7 +743,7 @@ Usage:
   sbxr status [PATH]       Check whether the project sandbox exists
   sbxr stop [PATH]         Stop the project sandbox
   sbxr rm [--force] [PATH] Remove sandbox state; host files remain
-  sbxr setup               Configure missing login, OAuth, and Remote-SSH
+  sbxr setup [--prebuild]  Configure the host; optionally warm the kit-composition cache
   sbxr doctor [PATH]       Check host prerequisites; with PATH compare guest versions
   sbxr --version           Print the installed sbxr version
   sbxr help
@@ -666,6 +762,12 @@ Options:
   --ghcr | --no-ghcr       Enable/disable host-proxied private GHCR credentials
   --paseo-relay | --no-paseo-relay
                            Enable/disable the authenticated remote Paseo relay
+  --shell-profile PROFILE  familiar (default), minimal, or custom host overlay
+  --login-shell SHELL      bash (default), zsh, or fish
+  --prompt STYLE           classic (default), plain, or custom
+  --prompt-file PATH       Trusted custom prompt file below the host home
+  --alias-file PATH        Additional trusted alias/RC file; repeatable
+  --bin-dir PATH           Additional executable directory; repeatable
   --preset PRESET          rust-multi-agent, rust-codex, or rust-claude
   --rocksdb-host[=PREFIX]  Mount a trusted host RocksDB prefix read-only
 
@@ -806,7 +908,11 @@ mod tests {
         ));
         assert!(matches!(
             Action::parse(vec!["setup".into()]).unwrap(),
-            Action::Setup
+            Action::Setup(SetupRequest { prebuild: false })
+        ));
+        assert!(matches!(
+            Action::parse(vec!["setup".into(), "--prebuild".into()]).unwrap(),
+            Action::Setup(SetupRequest { prebuild: true })
         ));
         assert!(Action::parse(vec!["setup".into(), ".".into()]).is_err());
         assert!(matches!(
@@ -968,6 +1074,12 @@ mod tests {
                 "--orca".into(),
                 "--ghcr".into(),
                 "--isolated".into(),
+                "--shell-profile=custom".into(),
+                "--login-shell=zsh".into(),
+                "--prompt-file=~/.config/zsh/prompt.zsh".into(),
+                "--alias-file=~/.config/zsh/aliases.zsh".into(),
+                "--bin-dir".into(),
+                "scripts".into(),
                 "--wizzard".into(),
             ],
             None,
@@ -980,6 +1092,15 @@ mod tests {
         assert_eq!(parsed.profile.browser, Some(true));
         assert_eq!(parsed.profile.orca, Some(true));
         assert_eq!(parsed.profile.ghcr, Some(true));
+        assert_eq!(parsed.profile.shell_profile, Some(ShellProfile::Custom));
+        assert_eq!(parsed.profile.shell_program, Some(ShellProgram::Zsh));
+        assert_eq!(parsed.profile.prompt, None);
+        assert_eq!(
+            parsed.profile.prompt_file.as_deref(),
+            Some(".config/zsh/prompt.zsh")
+        );
+        assert_eq!(parsed.profile.alias_files, [".config/zsh/aliases.zsh"]);
+        assert_eq!(parsed.profile.bin_dirs, ["scripts"]);
         assert!(parsed.profile.wizard);
         assert!(matches!(parsed.action, Action::New(Some(_))));
     }

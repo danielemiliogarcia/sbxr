@@ -18,9 +18,13 @@ pub(crate) fn run() -> Result<i32, String> {
         cli::print_version();
         return Ok(0);
     }
-    if matches!(cli.action, Action::Setup) {
+    if let Action::Setup(request) = &cli.action {
         let preserve = env::var("SBXR_PRESERVE_XDG_STATE_HOME").as_deref() == Ok("1");
         host::setup(cli.preset, preserve)?;
+        if request.prebuild {
+            let context = Context::discover()?;
+            host::prebuild(&context, cli.preset)?;
+        }
         return Ok(0);
     }
     if let Action::CommitPgpSign(request) = &cli.action {
@@ -166,7 +170,12 @@ fn dispatch(
         }
         Action::Shell(_) => {
             sandbox::ensure_dev(context, project, preset, rocksdb, profile, false, force)?;
-            sandbox::run_remote(context, project, name, &["bash", "-l"])?;
+            sandbox::run_remote(
+                context,
+                project,
+                name,
+                profile.shell.program.login_arguments(),
+            )?;
         }
         Action::Codex(_) => {
             if !preset.has_codex() {
@@ -305,7 +314,7 @@ fn dispatch(
             health::remove(context, name)?;
         }
         Action::CommitPgpSign(_)
-        | Action::Setup
+        | Action::Setup(_)
         | Action::Doctor(_)
         | Action::Version
         | Action::Help => unreachable!(),

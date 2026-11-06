@@ -5,7 +5,7 @@ use crate::{auth, envfile, health, process, sandbox, sbx};
 use serde_json::Value;
 use std::process::Stdio;
 
-const PINNED_RUST_VERSION: &str = "1.98.0";
+const PINNED_RUST_VERSION: &str = "1.99.1";
 const PINNED_PI_VERSION: &str = "1.4.0";
 const PINNED_PASEO_VERSION: &str = "0.8.0";
 const PINNED_NODE_VERSION: &str = "22.23.4";
@@ -777,14 +777,7 @@ exec pi --offline --no-extensions --model {LIVE_PI_MODEL} --thinking low \
                         .is_some_and(|text| text.trim() == "READY")
             })
         }),
-        "claude" => serde_json::from_slice::<Value>(&output.stdout).is_ok_and(|value| {
-            value.get("type").and_then(Value::as_str) == Some("result")
-                && value.get("is_error").and_then(Value::as_bool) == Some(false)
-                && value
-                    .get("result")
-                    .and_then(Value::as_str)
-                    .is_some_and(|text| text.trim() == "READY")
-        }),
+        "claude" => claude_live_response_succeeded(&output.stdout),
         "pi" => output.stdout.split(|byte| *byte == b'\n').any(|line| {
             serde_json::from_slice::<Value>(line).is_ok_and(|event| {
                 event.get("type").and_then(Value::as_str) == Some("message_end")
@@ -812,6 +805,19 @@ exec pi --offline --no-extensions --model {LIVE_PI_MODEL} --thinking low \
     }
     println!("ok   live {provider} request completed");
     Ok(())
+}
+
+fn claude_live_response_succeeded(bytes: &[u8]) -> bool {
+    bytes.split(|byte| *byte == b'\n').any(|line| {
+        serde_json::from_slice::<Value>(line).is_ok_and(|value| {
+            value.get("type").and_then(Value::as_str) == Some("result")
+                && value.get("is_error").and_then(Value::as_bool) == Some(false)
+                && value
+                    .get("result")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.trim().is_empty())
+        })
+    })
 }
 
 fn provider_failure(output: &std::process::Output) -> &'static str {
@@ -990,8 +996,70 @@ fn verify_rust_toolchains(
     preset: Preset,
     profile: &Profile,
 ) -> Result<(), String> {
+    verify_login_shell_tools(context, sandbox_name, preset, profile)?;
     report_tool_versions(context, sandbox_name, preset, profile)?;
     sandbox::verify_project_toolchains(context, sandbox_name, project)
+}
+
+fn verify_login_shell_tools(
+    context: &Context,
+    sandbox_name: &str,
+    preset: Preset,
+    profile: &Profile,
+) -> Result<(), String> {
+    let passwd = process::output_checked(
+        sbx::exec_command(context.preserve_xdg_state)
+            .arg(sandbox_name)
+            .args(["--", "getent", "passwd", "agent"]),
+        "checking the sandbox login shell",
+    )?;
+    let actual = String::from_utf8_lossy(&passwd.stdout)
+        .trim()
+        .rsplit(':')
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    let expected = profile.shell.program.guest_path();
+    if actual != expected {
+        return Err(format!(
+            "sandbox login shell drift: expected {expected}, got {actual}"
+        ));
+    }
+
+    let mut tools = vec!["rustc", "cargo", "rustup", "rust-analyzer", "node", "paseo"];
+    if preset.has_codex() {
+        tools.push("codex");
+    }
+    if preset.has_claude() {
+        tools.push("claude");
+    }
+    if preset == Preset::MultiAgent {
+        tools.push("pi");
+    }
+    if profile.github_proxy {
+        tools.push("gh");
+    }
+    let list = tools.join(" ");
+    let script = format!(
+        "exec /bin/sh -c 'for tool in {list}; do command -v \"$tool\" >/dev/null || {{ echo missing-login-shell-tool:$tool >&2; exit 1; }}; done'"
+    );
+    process::output_checked(
+        sbx::exec_command(context.preserve_xdg_state)
+            .arg(sandbox_name)
+            .arg("--")
+            .arg(profile.shell.program.name())
+            .args(["-lic", &script]),
+        &format!(
+            "checking tools through the {} login shell",
+            profile.shell.program.name()
+        ),
+    )?;
+    println!(
+        "ok   {} login shell resolves {}",
+        profile.shell.program.name(),
+        list
+    );
+    Ok(())
 }
 
 fn sandbox_version_arguments(tool: &str) -> Vec<&str> {
@@ -1310,6 +1378,23 @@ mod tests {
             ["rustup", "run", PINNED_RUST_VERSION, "cargo", "--version"]
         );
         assert_eq!(sandbox_version_arguments("pi"), ["pi", "--version"]);
+    }
+
+    #[test]
+    fn claude_live_response_accepts_nonempty_success_amid_notices() {
+        let response = br#"notice emitted by a launcher
+{"type":"result","is_error":false,"result":"READY"}
+"#;
+        assert!(claude_live_response_succeeded(response));
+        assert!(claude_live_response_succeeded(
+            br#"{"type":"result","is_error":false,"result":"A valid assistant response."}"#
+        ));
+        assert!(!claude_live_response_succeeded(
+            br#"{"type":"result","is_error":false,"result":"  "}"#
+        ));
+        assert!(!claude_live_response_succeeded(
+            br#"{"type":"result","is_error":true,"result":"READY"}"#
+        ));
     }
 
     #[test]

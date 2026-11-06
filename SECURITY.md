@@ -139,9 +139,35 @@ unsupported-secret boundaries are described in
   declared ranges rather than a host-verified version set. Their runtime code,
   raw Pi extensions, and mirrored Codex/Claude plugins still execute in the
   sandbox and must be treated as trusted code.
-- Host Bash aliases and every executable in the host `~/bin` are mirrored into
-  the sandbox and placed on `PATH`. They are host-authored code that runs there;
-  mirror them only from a trusted host profile, or set `SBXR_SYNC_HOST_SHELL=0`.
+- The selected host shell overlay is executable host-authored code. The default
+  mirrors Bash aliases and `~/bin`; custom profiles can select other alias,
+  prompt, and executable-directory paths below the host home for Bash, Zsh, or
+  Fish. Paths are traversal-checked and rejected when they are inside, contain,
+  or equal known credential stores such as `.ssh`, `.gnupg`, `.config/gh`,
+  `.docker`, agent homes, keyrings, login/environment files, or sbxr's
+  protected state. The check runs on the selected name and again on its
+  resolved target, so explicitly selected symlinks or intermediate components
+  cannot reach a store or escape the canonical host home; the comparison is
+  case-insensitive. An automatically discovered familiar-profile path that
+  resolves outside the home is skipped with a warning. Shell mirroring copies
+  an in-home symlinked top-level selection by content and skips nested links
+  that leave the selected tree.
+  These controls prevent
+  broad accidental credential copying, but contents are intentionally trusted,
+  not sanitized. Never select files containing secrets; use `minimal` or
+  `SBXR_SYNC_HOST_SHELL=0` when the host profile is not trusted. All mirrored
+  shell inputs live below the sbxr-owned guest root
+  `~/.local/share/sbxr/host-shell`; reconciliation replaces only that root and
+  never deletes or overwrites sandbox-managed paths.
+- The local Kits v3 composition cache contains only the repository's generic
+  provisioning recipe. Workspace files, personal shell/agent configuration,
+  VS Code extensions, Git identity, and credentials are post-creation inputs
+  and are never deliberately captured or published as an sbxr image. sbxr does
+  not save provisioned sandboxes as templates because Docker excludes mounted
+  volumes, including the Rust toolchain and Pi state, from those snapshots.
+- The nested Docker Engine is root-capable inside the guest for compatibility.
+  The microVM is the host isolation boundary; guest root can still destroy
+  sandbox-local state and anything in a writable shared workspace.
 - The sandbox Paseo daemon binds to the sandbox loopback interface with its
   external relay disabled, so reaching it requires an SSH session into that
   sandbox. Anyone who can open that session can drive the agents it controls.

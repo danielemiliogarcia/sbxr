@@ -129,9 +129,10 @@ renewal requires the host-proxied GitHub profile.
 ## Configuration mirroring
 
 `sbxr` can mirror trusted host agent preferences, plugins, instructions, hooks,
-prompts, themes, status-line helpers, Pi extensions, Bash aliases, selected
-`~/bin` utilities, and compatible VS Code extensions. These are executable
-inputs and expand the trusted computing base.
+prompts, themes, status-line helpers, Pi extensions, the profile-selected Bash,
+Zsh, or Fish alias and prompt files, selected executable directories, and
+compatible VS Code extensions. These are executable inputs and expand the
+trusted computing base.
 
 The mirror excludes supported authentication files, histories, sessions, logs,
 project-trust records, and runtime state. Docker-managed provider configuration
@@ -141,7 +142,10 @@ from mirrored Claude settings. Before mirroring Pi `models.json`, sbxr removes
 literal `apiKey` values and credential-like header values; only strict
 environment-variable references such as `$NAME` or `${NAME}` survive.
 
-Mirroring is not a generic secret filter for arbitrary files. Do not place
+Mirroring is not a generic secret filter for arbitrary file contents. Shell
+profiles refuse known credential-store paths and never follow escaping
+symlinks, but do not
+parse arbitrary prompts, aliases, or utilities for embedded tokens. Do not put
 tokens in prompts, hooks, aliases, extensions, project files, or utilities and
 expect sbxr to discover them.
 

@@ -68,8 +68,8 @@ The default `rust-multi-agent` preset combines:
 
 - Docker's digest-pinned official Kits v3 Codex workload and Claude mixin,
   with host-managed ChatGPT and Claude subscription OAuth;
-- pinned Rust tooling, Cargo security tools, and a colored Git-aware Bash
-  prompt, plus `nano`, Bash/Git completion, and a generated `en_US.UTF-8`
+- pinned Rust 1.99.1 tooling, Cargo security tools, and a colored Git-aware
+  Bash prompt, plus `nano`, Bash/Git completion, and a generated `en_US.UTF-8`
   locale for clean VS Code terminals;
 - the native Claude Code binary shipped by Docker's official Claude mixin;
 - pinned Pi, connected to the Docker-managed Codex and Claude OAuth proxies;
@@ -89,7 +89,8 @@ The default `rust-multi-agent` preset combines:
 - trusted-host Codex, Claude, and Pi extension/plugin and configuration
   mirroring, with credentials and runtime state excluded;
 - the host's Bash aliases and `~/bin` utilities mirrored into the sandbox and
-  placed on `PATH`.
+  placed on `PATH`, with opt-in Zsh/Fish, custom alias files, executable
+  directories, and prompt styles.
 
 The host launcher and its configuration-copy implementation are Rust. It ships
 no host shell helper and embeds all kit specifications in the executable. The
@@ -140,8 +141,37 @@ orchestration.
 | `sbxr rm .` | Remove sandbox-local state; host files remain |
 | `sbxr rm --force .` | Pass Docker's force flag while removing sandbox-local state |
 | `sbxr setup` | Configure missing Docker login, provider OAuth, and Remote-SSH |
+| `sbxr setup --prebuild` | Also warm the local content-addressed default kit-composition cache |
 | `sbxr doctor [PATH]` | Diagnose the host; with a project compare host/guest versions |
 | `sbxr --version` | Print the installed sbxr version |
+
+### CLI options
+
+| Option | Values/default | Effect |
+|---|---|---|
+| `-y`, `--yes-to-all`, `--force` | Off | Approve lifecycle plans and pass Docker `--force`; hardware-signing prompts remain interactive |
+| `--wizard`, `--wizzard` | Off | Ask for all optional project settings; the misspelling remains a compatibility alias |
+| `--config PATH` | None | Load, validate, and save a protected nonsecret JSON project profile |
+| `--shared`, `--isolated` | Shared | Use the writable host workspace or a mountless sandbox-local clone; changing it requires recreation |
+| `--network PROFILE` | `development` | Select `development`, `restricted`, or `offline`; reconciled in place |
+| `--memory SIZE`, `--cpus N` | Docker defaults | Set microVM resources; changing them requires recreation |
+| `--root-disk SIZE`, `--docker-disk SIZE` | Docker defaults | Set guest root/nested-Docker disk sizes; changing them requires recreation |
+| `--browser`, `--no-browser` | Off | Enable or disable the isolated Playwright MCP; changing it requires recreation |
+| `--orca`, `--no-orca` | Off | Enable or disable Orca Server; changing it requires recreation |
+| `--ghcr`, `--no-ghcr` | Off | Enable or disable host-proxied private GHCR access; changing it requires recreation |
+| `--paseo-relay`, `--no-paseo-relay` | Off | Enable or disable Paseo's authenticated relay; reconciled in place and incompatible with `offline` |
+| `--shell-profile PROFILE` | `familiar` | Select `familiar`, `minimal`, or `custom`; reconciled in place |
+| `--login-shell SHELL` | `bash` | Select `bash`, `zsh`, or `fish`; changing it requires recreation |
+| `--prompt STYLE` | `classic` | Select `classic`, `plain`, or `custom`; reconciled in place |
+| `--prompt-file PATH` | None | Select a trusted custom prompt file below the host home and imply a custom prompt |
+| `--alias-file PATH` | None; repeatable | Select a trusted alias file and imply the custom shell profile |
+| `--bin-dir PATH` | None; repeatable | Select a trusted executable directory and imply the custom shell profile |
+| `--preset PRESET` | `rust-multi-agent` | Select `rust-multi-agent`, `rust-codex`, or `rust-claude`; names and contracts are preset-specific |
+| `--rocksdb-host[=PREFIX]` | Off | Mount a trusted host RocksDB installation read-only; changing it requires recreation |
+
+Command-specific options are shown in the command table: `setup --prebuild`,
+`verify --live`, `commit-pgp-sign --all-mine`, `commit-pgp-sign --range`, and
+`rm --force`. Options may appear before or after the command.
 
 `-y`, `--yes-to-all`, and `--force` are equivalent. On commands that may create
 or start a sandbox, they pass `--force` to `sbx env run` and skip Docker's
@@ -162,6 +192,7 @@ sbxr --browser --memory 8g --cpus 4 new -y .
 sbxr --network restricted up -y .
 sbxr --ghcr up -y .
 sbxr --paseo-relay up -y .
+sbxr --login-shell zsh --alias-file ~/.config/zsh/aliases.zsh new -y .
 ```
 
 Selections are validated and saved as nonsecret JSON under the protected sbxr
@@ -488,6 +519,44 @@ network, and isolated Docker Engine. The developer does not create a VM image,
 configure SSH ports, expose the host Docker socket, or maintain a privileged
 container solely to give an agent Docker access.
 
+The Docker Engine inside the microVM remains Docker Sandboxes' normal
+root-capable guest engine. `sbxr` treats the microVM—not an additional
+rootless-engine layer—as the host security boundary, so containerized builds
+and end-to-end tests retain broad Docker compatibility out of the box. Guest
+root remains powerful inside the sandbox and can still damage sandbox-local
+state or the explicitly shared workspace.
+
+## Local kit-composition cache, not a personalized registry image
+
+`sbxr` deliberately does not publish or snapshot a personalized machine
+image. Docker's digest-pinned official agent workloads provide the reviewed
+base, while the Kits v3 specifications committed in this repository are the
+deterministic generic recipe for Rust, Node, CLI, editor, and shell
+prerequisites. Docker Sandboxes assembles source-form kit compositions into
+content-addressed images in its private local runtime and reuses a matching
+composition across sandbox creation. A normal `sbxr new` warms this cache
+automatically.
+
+`sbxr setup --prebuild` is an optional way to move kit assembly ahead of the
+first project creation. It creates a workspace-free disposable sandbox from
+the pinned default composition, removes that sandbox afterward, and leaves
+Docker's composition image cached. It neither requires Docker Engine/Desktop
+on the host nor exports or pushes an image.
+Personal aliases, prompt files, executable directories, agent settings, VS
+Code extensions, project files, Git identity, and credentials are applied only
+after a real sandbox exists and are never cache inputs. If prebuilding is not
+supported or desired, the ordinary official-workload-plus-kits path remains
+the complete fallback.
+
+This cache avoids repeating kit **assembly**, not every provisioning step.
+Each new microVM still receives fresh persistent volumes and runs the kit's
+idempotent install hooks to initialize them. In particular, Docker's saved
+templates omit mounted filesystems, so snapshotting the warm-up sandbox would
+drop sbxr's volume-backed Rust toolchains and Pi state. sbxr therefore never
+uses a saved template as a shortcut. Docker owns cache reclamation; the broad,
+destructive `sbx reset` command clears the image cache along with all sandbox
+state and authentication.
+
 In the default direct mode, Docker Sandboxes mounts the selected project into
 the microVM through filesystem passthrough at the same absolute path it has on
 the host. Both sides see the same working tree, and writes appear immediately
@@ -567,6 +636,10 @@ open a browser or download the extension. It verifies the result of each
 command and continues far enough to report multiple problems together. It
 never installs system packages or invokes `sudo`; missing `sbx`, VS Code,
 OpenSSH, Git, or KVM still receive explicit manual installation guidance.
+Passing `--prebuild` runs the same checks first and then warms only the generic
+local Kits v3 composition cache. It shifts composition work ahead of the first
+project, but fresh volume initialization and install-hook verification still
+occur when each project sandbox is created.
 
 The automated steps are equivalent to running these commands manually when
 their corresponding state is missing:
@@ -741,12 +814,47 @@ separate host checkout, for instance—is copied by content under the link's own
 name, because the sandbox has no copy of the path it names. A link the host
 itself cannot resolve is skipped.
 
-The host's shell conveniences are mirrored during the same bootstrap: the alias
-definitions in `~/.bashrc`, the whole of `~/.bash_aliases`, and the `~/bin`
-utility directory, which is appended to `PATH` so sandbox-managed toolchains
-keep priority over a mirrored command of the same name. The rest of the host
-`.bashrc` is not adopted, since it configures host paths and host-only
-integrations. Set `SBXR_SYNC_HOST_SHELL=0` to skip all of it.
+The default `familiar` shell profile preserves the existing behavior: it
+extracts alias definitions from `~/.bashrc`, mirrors `~/.bash_aliases` and
+`~/bin` into the sbxr-owned guest folder `~/.local/share/sbxr/host-shell`, and
+appends the mirrored `bin` to `PATH` so sandbox-managed toolchains keep
+priority. The rest of `.bashrc` is not adopted. Choose Bash, Zsh, or Fish and
+configure the overlay through the wizard or direct options:
+
+```bash
+# Clean sbxr shell with no default host alias/bin mirror.
+sbxr --shell-profile minimal --prompt plain new -y .
+
+# Mirror only explicitly selected Zsh inputs.
+sbxr --shell-profile custom --login-shell zsh \
+  --alias-file ~/.config/zsh/aliases.zsh \
+  --bin-dir ~/scripts \
+  --prompt-file ~/.config/zsh/prompt.zsh new -y .
+```
+
+`--alias-file` and `--bin-dir` are repeatable and automatically select the
+`custom` profile; `familiar` uses only conventions for the selected shell and
+`minimal` uses no alias or executable paths. Explicitly selected paths must
+remain below the host home and retain their relative suffix below the sbxr-owned guest mirror
+`~/.local/share/sbxr/host-shell`. sbxr refuses paths that overlap known
+credential stores (including `.ssh`, `.gnupg`, `.config/gh`, `.docker`, agent
+credential/config homes, and protected sbxr state), and shell trees never
+follow symlinks that escape the selected tree. Top-level selections must be
+regular files/directories whose resolved targets remain below the host home;
+an automatically discovered familiar-profile alias file or `bin` directory
+whose target leaves the home is skipped with a warning instead of blocking
+the sandbox. Explicit external selections remain errors. Escaping nested links
+are skipped. This is a defense-in-depth path policy, not
+a content secret scanner: selected files must still be trusted and nonsecret.
+`--prompt` accepts
+`classic`, `plain`, or `custom`; `--prompt-file` selects `custom`
+automatically. Zsh and Fish are installed only when selected. Changing the
+login-shell program changes the kit contract and requires recreation; changing
+the overlay is reconciled in place. sbxr fingerprints the selected host files
+and directories on every ensuring command, replaces changed content, and
+removes paths that are no longer selected; `sbxr update` still forces a full
+refresh.
+Set `SBXR_SYNC_HOST_SHELL=0` to skip the overlay entirely.
 
 Mirrored hooks, plugins, skills, and extensions are executable software. Only
 mirror them from a trusted host profile.
@@ -778,9 +886,9 @@ mirror them from a trusted host profile.
   and installation-state hashing;
 - `src/github_proxy.rs`, `src/browser.rs`, and `src/orca.rs`: optional/default
   integration bootstrap without host credential copies;
-- `kits/`: embedded declarative sandbox mixins, including `host-shell` for the
-  mirrored host aliases and `~/bin` PATH hook and `paseo-cli` for the pinned
-  Paseo CLI and its loopback-only daemon;
+- `kits/`: embedded declarative sandbox mixins, including `host-shell`,
+  `bash-shell`, `zsh-shell`, and `fish-shell` for profile-selected shell integration and
+  `paseo-cli` for the pinned Paseo CLI and its loopback-only daemon;
 - `src/vscode.rs`: Remote-SSH launch and extension mirroring;
 - `src/sync.rs`: pure-Rust capability selection, merges, path rewriting, tar
   streaming, and persistent bootstrap markers;

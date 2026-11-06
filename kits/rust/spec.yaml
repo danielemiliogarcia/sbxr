@@ -1,7 +1,7 @@
 # syntax=docker/sandbox-kit:3
 schemaVersion: "3"
 kind: mixin
-version: "1.98.0"
+version: "1.99.1-sbxr.1"
 displayName: Rust development toolchain
 description: A pinned stable Rust toolchain with rustfmt, Clippy, rust-src, rust-analyzer, LLDB, cargo-vet, cargo-deny, and cargo-audit.
 sourceUrl: https://github.com/docker/sbx-kits-contrib
@@ -99,13 +99,13 @@ capabilities:
               rm -f /tmp/rustup-init
             fi
 
-            rustup toolchain install 1.98.0 --profile minimal
-            rustup component add --toolchain 1.98.0 rustfmt clippy rust-src rust-analyzer
-            rustup default 1.98.0
+            rustup toolchain install 1.99.1 --profile minimal
+            rustup component add --toolchain 1.99.1 rustfmt clippy rust-src rust-analyzer
+            rustup default 1.99.1
             rustc --version
             cargo --version
           user: "1000"
-          description: Install rustup 1.29.0 and pinned Rust 1.98.0 components
+          description: Install rustup 1.29.0 and pinned Rust 1.99.1 components
 
         # Keep source builds in separate hooks: sbx bounds each install hook's
         # execution time. The job setting applies only while provisioning, not to
@@ -167,12 +167,21 @@ capabilities:
             set -euo pipefail
             for tool in \
               cargo cargo-audit cargo-clippy cargo-deny cargo-vet clippy-driver \
-              rust-analyzer rustc rustdoc rustfmt rustup; do
+              rustc rustdoc rustfmt rustup; do
               test -e "/home/agent/.cargo/bin/$tool"
               ln -sfn "/home/agent/.cargo/bin/$tool" "/usr/local/bin/$tool"
             done
+            # rustup's rust-analyzer shim follows the nearest project override.
+            # Older/nested toolchains may not ship that component, while the
+            # editor server should remain the sbxr-pinned version and still let
+            # Cargo select each project's compiler toolchain.
+            cat > /usr/local/bin/rust-analyzer <<'SBXR_RUST_ANALYZER'
+            #!/bin/sh
+            exec /home/agent/.cargo/bin/rustup run 1.99.1 rust-analyzer "$@"
+            SBXR_RUST_ANALYZER
+            chmod 0755 /usr/local/bin/rust-analyzer
           user: "0"
-          description: Expose Rust commands to login and non-interactive shells
+          description: Expose Rust commands and pin the rust-analyzer server independently of project overrides
 
         - command: |
             set -euo pipefail

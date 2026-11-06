@@ -133,8 +133,17 @@ pub(crate) fn ensure_dev(
         state.git = true;
         sync::write_bootstrap_state(name, context.preserve_xdg_state, state)?;
     }
-    if !state.shell {
-        sync_host_shell(context, name)?;
+    let shell_disabled = env::var("SBXR_SYNC_HOST_SHELL").as_deref() == Ok("0");
+    let shell_current = shell_disabled
+        || (state.shell
+            && sync::host_shell_profile_current(
+                name,
+                context.preserve_xdg_state,
+                &profile.shell,
+                &context.state_root,
+            )?);
+    if !shell_current {
+        sync_host_shell(context, name, &profile.shell)?;
         state.shell = true;
         sync::write_bootstrap_state(name, context.preserve_xdg_state, state)?;
     }
@@ -429,6 +438,7 @@ for directory do
   cd -- "$directory"
   RUSTUP_AUTO_INSTALL=0 cargo --version >/dev/null
   RUSTUP_AUTO_INSTALL=0 rustc --version >/dev/null
+  RUSTUP_AUTO_INSTALL=0 rust-analyzer --version | grep -F 'rust-analyzer 1.99.1' >/dev/null
 done
 "#;
     let mut command = sbx::exec_command(context.preserve_xdg_state);
@@ -519,16 +529,27 @@ fn project_toolchain_manifests(root: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(manifests)
 }
 
-fn sync_host_shell(context: &Context, sandbox_name: &str) -> Result<(), String> {
+fn sync_host_shell(
+    context: &Context,
+    sandbox_name: &str,
+    shell: &crate::profile::ShellConfig,
+) -> Result<(), String> {
     if env::var("SBXR_SYNC_HOST_SHELL").as_deref() == Ok("0") {
         println!("note: host shell-environment mirroring is disabled");
         return Ok(());
     }
     println!(
-        "==> mirroring trusted host Bash aliases and ~/bin utilities into {}",
+        "==> applying {} {} shell profile to {}",
+        shell.profile.name(),
+        shell.program.name(),
         sandbox_name
     );
-    sync::host_shell(sandbox_name, context.preserve_xdg_state)
+    sync::host_shell(
+        sandbox_name,
+        context.preserve_xdg_state,
+        shell,
+        &context.state_root,
+    )
 }
 
 fn ensure_utf8_locale(context: &Context, sandbox_name: &str) -> Result<(), String> {
