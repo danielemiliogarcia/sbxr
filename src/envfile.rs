@@ -215,9 +215,14 @@ pub(crate) struct SharedEnvironment {
     pub(crate) workspace: PathBuf,
 }
 
+/// Lists sbxr shared-workspace environments whose workspace can reach any of
+/// `metadata_paths` (the worktree root, its Git directory, and the common Git
+/// directory). A linked worktree keeps its config, hooks, and registration in
+/// the main checkout's `.git`, so a sandbox of that main checkout must be
+/// found even though its workspace does not overlap the worktree root.
 pub(crate) fn shared_environments_for_repository(
     context: &Context,
-    repository: &Path,
+    metadata_paths: &[&Path],
 ) -> Result<Vec<SharedEnvironment>, String> {
     let projects = context.state_root.join("projects");
     if !projects.exists() {
@@ -225,12 +230,17 @@ pub(crate) fn shared_environments_for_repository(
     }
     inspect_secure_directory(&context.state_root)?;
     inspect_secure_directory(&projects)?;
-    let repository = repository.canonicalize().map_err(|error| {
-        format!(
-            "could not canonicalize Git repository {}: {error}",
-            repository.display()
-        )
-    })?;
+    let metadata_paths = metadata_paths
+        .iter()
+        .map(|path| {
+            path.canonicalize().map_err(|error| {
+                format!(
+                    "could not canonicalize Git repository path {}: {error}",
+                    path.display()
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let mut environments = Vec::new();
     for entry in fs::read_dir(&projects)
         .map_err(|error| format!("could not read {}: {error}", projects.display()))?
@@ -272,10 +282,7 @@ pub(crate) fn shared_environments_for_repository(
                 ));
             }
         };
-        if workspace == repository
-            || workspace.starts_with(&repository)
-            || repository.starts_with(&workspace)
-        {
+        if workspace_can_reach(&workspace, &metadata_paths) {
             environments.push(SharedEnvironment {
                 name: environment.name,
                 workspace,
@@ -284,6 +291,12 @@ pub(crate) fn shared_environments_for_repository(
     }
     environments.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(environments)
+}
+
+fn workspace_can_reach(workspace: &Path, metadata_paths: &[PathBuf]) -> bool {
+    metadata_paths
+        .iter()
+        .any(|path| workspace.starts_with(path) || path.starts_with(workspace))
 }
 
 fn parse_shared_environment(
@@ -1184,10 +1197,71 @@ mod tests {
             state_root: state,
             preserve_xdg_state: false,
         };
-        let environments = shared_environments_for_repository(&context, &workspace).unwrap();
+        let environments =
+            shared_environments_for_repository(&context, &[workspace.as_path()]).unwrap();
         assert_eq!(environments.len(), 1);
         assert_eq!(environments[0].name, "shared");
         assert_eq!(environments[0].workspace, nested.canonicalize().unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn linked_worktree_metadata_reaches_the_main_checkout_sandbox() {
+        let root = std::env::temp_dir().join(format!(
+            "sbxr-linked-worktree-environment-test-{}-{}",
+            std::process::id(),
+            TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let state = root.join("state");
+        let projects = state.join("projects");
+        let main_checkout = root.join("main");
+        let common_dir = main_checkout.join(".git");
+        let git_dir = common_dir.join("worktrees/feature");
+        let worktree = root.join("worktrees/feature");
+        let unrelated = root.join("unrelated");
+        for directory in [&git_dir, &worktree, &unrelated] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        secure_directory(&state).unwrap();
+        secure_directory(&projects).unwrap();
+        for (name, path) in [("main", &main_checkout), ("unrelated", &unrelated)] {
+            let definitions = projects.join(name).join("definitions");
+            secure_directory(&projects.join(name)).unwrap();
+            secure_directory(&definitions).unwrap();
+            atomic_write(
+                &definitions.join(".sbxenv.yaml"),
+                format!(
+                    "schemaVersion: \"1\"\nname: \"{name}\"\nagent: \"codex\"\nworkspace:\n  path: {}\n  clone: false\nkits: []\n",
+                    serde_json::to_string(path.to_str().unwrap()).unwrap()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        }
+        let context = Context {
+            kit_root: root.join("kits"),
+            state_root: state,
+            preserve_xdg_state: false,
+        };
+
+        // The worktree root alone cannot see the sandbox that owns its config.
+        assert!(
+            shared_environments_for_repository(&context, &[worktree.as_path()])
+                .unwrap()
+                .is_empty()
+        );
+        let environments = shared_environments_for_repository(
+            &context,
+            &[worktree.as_path(), git_dir.as_path(), common_dir.as_path()],
+        )
+        .unwrap();
+        assert_eq!(
+            environments
+                .iter()
+                .map(|environment| environment.name.as_str())
+                .collect::<Vec<_>>(),
+            ["main"]
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

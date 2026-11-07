@@ -143,9 +143,8 @@ impl Audit {
     }
 }
 
-pub(crate) fn repository_root(requested: &Path) -> Result<PathBuf, String> {
+pub(crate) fn repository_layout(requested: &Path) -> Result<RepositoryLayout, String> {
     discover_layout(requested)?
-        .map(|layout| layout.root)
         .ok_or_else(|| format!("no Git repository contains {}", requested.display()))
 }
 
@@ -248,6 +247,27 @@ impl HostConfig {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl HostConfig {
+    /// Builds trusted host configuration without reading the developer's
+    /// global Git config, so tests can sign with a throwaway key.
+    pub(crate) fn for_tests(
+        gpg_program: PathBuf,
+        user_name: &str,
+        user_email: &str,
+        signing_key: &str,
+    ) -> Self {
+        Self {
+            git_program: trusted_program("git", None, Path::new("/nonexistent-sbxr-repository"))
+                .unwrap(),
+            gpg_program,
+            user_name: user_name.to_owned(),
+            user_email: user_email.to_owned(),
+            signing_key: signing_key.to_owned(),
+        }
     }
 }
 
@@ -955,6 +975,88 @@ mod tests {
         }
     }
 
+    fn unique_temp(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        env::temp_dir().join(format!(
+            "sbxr-git-trust-{label}-{}-{unique}",
+            std::process::id()
+        ))
+    }
+
+    /// Runs fixture Git with no global/system config so the developer's own
+    /// configuration (signing, hooks, includes) cannot affect the fixture.
+    fn fixture_git(directory: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(directory)
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgSign=false",
+                "-c",
+                "init.defaultBranch=master",
+            ])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// A main checkout with one commit plus a linked worktree created by Git
+    /// itself, as tools such as Orca do.
+    struct LinkedWorktree {
+        root: PathBuf,
+        main: PathBuf,
+        worktree: PathBuf,
+    }
+
+    impl LinkedWorktree {
+        fn create(label: &str) -> Self {
+            let root = unique_temp(label);
+            let main = root.join("main");
+            let worktree = root.join("worktrees/feature");
+            fs::create_dir_all(&main).unwrap();
+            fixture_git(&main, &["init", "-q"]);
+            fs::write(main.join("README.md"), "fixture\n").unwrap();
+            fixture_git(&main, &["add", "README.md"]);
+            fixture_git(&main, &["commit", "-q", "-m", "initial"]);
+            fixture_git(
+                &main,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    "feature",
+                    worktree.to_str().unwrap(),
+                ],
+            );
+            Self {
+                root,
+                main,
+                worktree,
+            }
+        }
+    }
+
+    impl Drop for LinkedWorktree {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
     fn kind(key: &str, value: &str) -> Option<FindingKind> {
         classify(key, value, Some("TRUSTED")).map(|finding| finding.0)
     }
@@ -1116,5 +1218,148 @@ mod tests {
         fs::create_dir(&link_root).unwrap();
         symlink(repository.root.join(".git"), link_root.join(".git")).unwrap();
         assert!(audit(&link_root, None).unwrap_err().contains("symlinked"));
+    }
+
+    #[test]
+    fn registered_linked_worktree_is_accepted_and_audits_the_common_config() {
+        let fixture = LinkedWorktree::create("worktree");
+        let audit_result = audit(&fixture.worktree, None).unwrap().unwrap();
+        let common_dir = fixture.main.join(".git").canonicalize().unwrap();
+        assert_eq!(
+            audit_result.layout.root,
+            fixture.worktree.canonicalize().unwrap()
+        );
+        assert_eq!(audit_result.layout.common_dir, common_dir);
+        assert_eq!(
+            audit_result.layout.git_dir,
+            common_dir.join("worktrees/feature")
+        );
+        assert!(
+            audit_result.signing_allowed(),
+            "a fresh Git-created worktree must be signable: {:?}",
+            audit_result.findings
+        );
+
+        // Executable settings live in the main checkout's config, outside the
+        // worktree root; they must still be found from the worktree.
+        let marker = fixture.root.join("HOST_COMMAND_EXECUTED");
+        fixture_git(
+            &fixture.main,
+            &[
+                "config",
+                "--local",
+                "gpg.program",
+                &format!("touch {}", marker.display()),
+            ],
+        );
+        let audit_result = audit(&fixture.worktree, None).unwrap().unwrap();
+        assert!(!audit_result.signing_allowed());
+        assert!(audit_result.findings.iter().any(|finding| {
+            finding.key == "gpg.program" && finding.source == ConfigSource::Common
+        }));
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn worktree_specific_config_is_audited() {
+        let fixture = LinkedWorktree::create("worktree-config");
+        fixture_git(
+            &fixture.main,
+            &["config", "--local", "extensions.worktreeConfig", "true"],
+        );
+        fixture_git(
+            &fixture.worktree,
+            &["config", "--worktree", "core.fsmonitor", "/tmp/x"],
+        );
+        let audit_result = audit(&fixture.worktree, None).unwrap().unwrap();
+        assert!(audit_result.findings.iter().any(|finding| {
+            finding.key == "core.fsmonitor" && finding.source == ConfigSource::Worktree
+        }));
+    }
+
+    #[test]
+    fn forged_linked_worktree_backlink_is_rejected() {
+        let fixture = LinkedWorktree::create("worktree-forged");
+        let decoy = fixture.root.join("decoy");
+        fs::create_dir_all(&decoy).unwrap();
+        fs::write(decoy.join(".git"), "").unwrap();
+        fs::write(
+            fixture.main.join(".git/worktrees/feature/gitdir"),
+            format!("{}\n", decoy.join(".git").display()),
+        )
+        .unwrap();
+        let error = audit(&fixture.worktree, None).unwrap_err();
+        assert!(error.contains("backlink does not identify"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_linked_worktree_backlink_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = LinkedWorktree::create("worktree-symlink");
+        let backlink = fixture.main.join(".git/worktrees/feature/gitdir");
+        let real = fixture.root.join("real-gitdir");
+        fs::rename(&backlink, &real).unwrap();
+        symlink(&real, &backlink).unwrap();
+        let error = audit(&fixture.worktree, None).unwrap_err();
+        assert!(error.contains("symbolic link"), "{error}");
+    }
+
+    #[test]
+    fn unregistered_out_of_tree_git_directory_is_rejected() {
+        let fixture = LinkedWorktree::create("worktree-unregistered");
+        // A gitfile may point at a guest-chosen directory outside the
+        // checkout; only Git's own worktrees/<name> registration is accepted.
+        let foreign = fixture.root.join("foreign-gitdir");
+        fs::create_dir_all(&foreign).unwrap();
+        fs::write(
+            fixture.worktree.join(".git"),
+            format!("gitdir: {}\n", foreign.display()),
+        )
+        .unwrap();
+        let error = audit(&fixture.worktree, None).unwrap_err();
+        assert!(
+            error.contains("not a registered linked worktree"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn attribute_selected_filters_and_drivers_are_detected_without_running() {
+        let marker = unique_temp("filter-marker");
+        let touch = format!("touch {}", marker.display());
+        let repository = TestRepository::create(
+            "filters",
+            &format!(
+                "[core]\n\trepositoryformatversion = 0\n\
+                 [filter \"evil\"]\n\tclean = {touch}\n\tsmudge = {touch}\n\tprocess = {touch}\n\
+                 [diff \"evil\"]\n\ttextconv = {touch}\n\
+                 [merge \"evil\"]\n\tdriver = {touch}\n"
+            ),
+        );
+        fs::write(
+            repository.root.join(".gitattributes"),
+            "* filter=evil diff=evil merge=evil\n",
+        )
+        .unwrap();
+        let audit_result = audit(&repository.root, None).unwrap().unwrap();
+        assert!(!audit_result.signing_allowed());
+        let keys = audit_result
+            .findings
+            .iter()
+            .filter(|finding| finding.kind == FindingKind::Dangerous)
+            .map(|finding| finding.key.as_str())
+            .collect::<BTreeSet<_>>();
+        for key in [
+            "filter.evil.clean",
+            "filter.evil.smudge",
+            "filter.evil.process",
+            "diff.evil.textconv",
+            "merge.evil.driver",
+        ] {
+            assert!(keys.contains(key), "{key} not flagged: {keys:?}");
+        }
+        assert!(!marker.exists());
     }
 }

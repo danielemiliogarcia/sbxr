@@ -2,7 +2,7 @@
 
 Review date: 2026-11-04
 
-This document records the dependency intake review applicable to `sbxr` 0.3.7.
+This document records the dependency intake review applicable to `sbxr` 0.3.8.
 It is evidence of a version-specific review, not a guarantee that third-party
 code is vulnerability-free or non-malicious.
 
