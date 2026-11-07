@@ -50,6 +50,7 @@ cp "$source_binary" "$temporary/$name/$binary"
 cp \
   "$root/LICENSE" \
   "$root/README.md" \
+  "$root/README-EXTENDED.md" \
   "$root/SECURITY.md" \
   "$root/CREDENTIAL_ARCHITECTURE.md" \
   "$root/THIRD_PARTY_REVIEW.md" \
