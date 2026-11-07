@@ -45,6 +45,7 @@ Each target archive contains:
 sbxr[.exe]
 LICENSE
 README.md
+README-EXTENDED.md
 SECURITY.md
 CREDENTIAL_ARCHITECTURE.md
 THIRD_PARTY_REVIEW.md
@@ -53,10 +54,12 @@ RELEASE-MANIFEST.txt
 ```
 
 The release also contains `install.sh`, `install.ps1`, and `SHA256SUMS`. Every
-published file receives a GitHub build-provenance attestation. The installers
-require an exact version, download only the matching archive, verify its
-repository/workflow/tag attestation and SHA-256, confirm the embedded version,
-and refuse to replace a symlink or Windows reparse-point destination.
+published file receives a GitHub build-provenance attestation. With no explicit
+version, the installers discover the newest release containing their installer
+asset; callers can still select an exact version. They download only the
+matching archive, verify its repository/workflow/tag attestation and SHA-256,
+confirm the embedded version, and refuse to replace a symlink or Windows
+reparse-point destination.
 
 ## Prepare a release
 
@@ -98,8 +101,10 @@ and refuse to replace a symlink or Windows reparse-point destination.
 
 7. Push the branch and let normal CI pass. Manually dispatch the `Release`
    workflow once if the complete four-platform artifact matrix should be tested
-   before tagging. Manual dispatch uploads workflow artifacts but never creates
-   a GitHub Release.
+   before tagging. Each native job tests both the explicit-version installer
+   path and automatic release discovery against its locally packaged archive.
+   Manual dispatch uploads workflow artifacts but never creates a GitHub
+   Release.
 
 ## Publish
 
@@ -117,6 +122,14 @@ Cargo package, `VERSION`, or changelog heading disagree. The publishing job has
 the only `contents: write`, `id-token: write`, and `attestations: write`
 permissions; checkout credentials are never persisted. External actions are
 pinned to immutable commit hashes.
+
+After publication, a second four-platform matrix downloads the public POSIX or
+PowerShell installer, verifies its exact tag/workflow attestation, runs it
+without supplying a version, and checks that the installed binary reports the
+tag. This exercises the same latest-release discovery path shown in the README.
+Because the assets must already exist, this final smoke test cannot prevent
+publication; a failure requires investigating the published release before it
+is announced more broadly.
 
 After publication, verify at least one archive independently:
 

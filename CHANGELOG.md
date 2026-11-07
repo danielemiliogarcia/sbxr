@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.5] - 2026-11-07
+
+### Changed
+
+- The POSIX and PowerShell binary installers now discover the newest eligible
+  release when no version is supplied, while retaining explicit version pins
+  for reproducible installs. The release matrix exercises both paths on every
+  native target before publication, then a second four-platform matrix
+  downloads, attests, and runs the real public installers after publication.
+  The README now presents short binary and reviewed source quick starts
+  followed by one common setup flow.
+- The main README is now a concise landing page containing the quick start,
+  included environment, local kit-cache model, and limitations. Detailed
+  commands, architecture, integrations, setup behavior, customization, and
+  security installation guidance moved to the linked `README-EXTENDED.md`,
+  which is also included in binary release archives.
+
 ## [0.3.4] - 2026-11-06
 
 ### Added

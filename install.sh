@@ -13,7 +13,15 @@ fail() {
 }
 
 if [ -z "$version" ]; then
-  fail "set SBXR_VERSION or pass the release version as the first argument"
+  if [ -n "$release_dir" ]; then
+    fail "set SBXR_VERSION when using SBXR_RELEASE_DIR"
+  fi
+  command -v gh >/dev/null 2>&1 || fail "GitHub CLI (gh) is required to discover, download, and verify the latest release"
+  if ! version=$(gh api "repos/$repository/releases?per_page=100" \
+    --jq '[.[] | select(.draft == false and .prerelease == false and any(.assets[]; .name == "install.sh"))][0].tag_name'); then
+    fail "could not discover the latest sbxr release"
+  fi
+  [ -n "$version" ] || fail "no sbxr release containing install.sh was found"
 fi
 if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$'; then
   fail "invalid sbxr version: $version"
@@ -60,6 +68,7 @@ if [ -n "$release_dir" ]; then
   cp "$release_dir/SHA256SUMS" "$temporary/SHA256SUMS"
 else
   command -v gh >/dev/null 2>&1 || fail "GitHub CLI (gh) is required to download and verify release provenance"
+  gh attestation verify --help >/dev/null 2>&1 || fail "update GitHub CLI (gh): this installer requires 'gh attestation verify' support"
   gh release download "$version" \
     --repo "$repository" \
     --pattern "$archive" \

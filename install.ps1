@@ -9,7 +9,19 @@ $Workflow = "$Repository/.github/workflows/release.yml"
 $ReleaseDir = $env:SBXR_RELEASE_DIR
 
 if ([string]::IsNullOrWhiteSpace($Version)) {
-    throw "Set SBXR_VERSION or pass -Version with an exact release version."
+    if (-not [string]::IsNullOrWhiteSpace($ReleaseDir)) {
+        throw "Set SBXR_VERSION when using SBXR_RELEASE_DIR."
+    }
+    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+        throw "GitHub CLI (gh) is required to discover, download, and verify the latest release."
+    }
+    $Version = (& gh api "repos/$Repository/releases?per_page=100" --jq '[.[] | select(.draft == false and .prerelease == false and any(.assets[]; .name == "install.ps1"))][0].tag_name' | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not discover the latest sbxr release."
+    }
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        throw "No sbxr release containing install.ps1 was found."
+    }
 }
 if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$') {
     throw "Invalid sbxr version: $Version"
@@ -44,6 +56,10 @@ try {
     else {
         if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
             throw "GitHub CLI (gh) is required to download and verify release provenance."
+        }
+        & gh attestation verify --help *> $null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Update GitHub CLI (gh): this installer requires 'gh attestation verify' support."
         }
         & gh release download $Version --repo $Repository --pattern $Archive --pattern SHA256SUMS --dir $Temporary
         if ($LASTEXITCODE -ne 0) { throw "gh release download failed." }

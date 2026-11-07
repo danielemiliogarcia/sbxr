@@ -109,6 +109,89 @@ jobs:
           $version = (Get-Content VERSION).Trim()
           ./install.ps1 -Version $version
           if ((& "$env:SBXR_INSTALL_DIR\sbxr.exe" --version) -ne "sbxr $version") { throw "installed binary smoke test failed" }
+      - name: Smoke-test automatic release discovery on Unix
+        if: ${{ !matrix.windows }}
+        shell: bash
+        env:
+          SBXR_INSTALL_DIR: ${{ runner.temp }}/sbxr-auto-bin
+        run: |
+          version=$(tr -d '[:space:]' < VERSION)
+          archive="sbxr-$version-${{ matrix.target }}.tar.gz"
+          fake_bin="$RUNNER_TEMP/sbxr-fake-gh-bin"
+          mkdir -p "$fake_bin"
+          cat > "$fake_bin/gh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          case "${1:-}" in
+            api)
+              printf '%s\n' "$SBXR_TEST_VERSION"
+              ;;
+            attestation)
+              ;;
+            release)
+              destination=
+              shift
+              while (($#)); do
+                case "$1" in
+                  --dir)
+                    destination=$2
+                    shift 2
+                    ;;
+                  *) shift ;;
+                esac
+              done
+              test -n "$destination"
+              cp "$SBXR_TEST_RELEASE_DIR/$SBXR_TEST_ARCHIVE" "$destination/"
+              cp "$SBXR_TEST_RELEASE_DIR/SHA256SUMS" "$destination/"
+              ;;
+            *)
+              printf 'unexpected fake gh command: %s\n' "$*" >&2
+              exit 2
+              ;;
+          esac
+          EOF
+          chmod 0755 "$fake_bin/gh"
+          export SBXR_TEST_VERSION="$version"
+          export SBXR_TEST_ARCHIVE="$archive"
+          export SBXR_TEST_RELEASE_DIR="$GITHUB_WORKSPACE/target/distrib"
+          PATH="$fake_bin:$PATH" ./install.sh
+          test "$("$SBXR_INSTALL_DIR/sbxr" --version)" = "sbxr $version"
+      - name: Smoke-test automatic release discovery on Windows
+        if: ${{ matrix.windows }}
+        shell: pwsh
+        env:
+          SBXR_INSTALL_DIR: ${{ runner.temp }}\sbxr-auto-bin
+        run: |
+          $env:SBXR_TEST_VERSION = (Get-Content VERSION).Trim()
+          $env:SBXR_TEST_ARCHIVE = "sbxr-$env:SBXR_TEST_VERSION-${{ matrix.target }}.zip"
+          $env:SBXR_TEST_RELEASE_DIR = Join-Path $env:GITHUB_WORKSPACE "target\distrib"
+          function global:gh {
+              if ($args[0] -eq "api") {
+                  Write-Output $env:SBXR_TEST_VERSION
+                  $global:LASTEXITCODE = 0
+                  return
+              }
+              if ($args[0] -eq "attestation") {
+                  $global:LASTEXITCODE = 0
+                  return
+              }
+              if ($args[0] -eq "release") {
+                  $dirIndex = [Array]::IndexOf($args, "--dir")
+                  if ($dirIndex -lt 0 -or $dirIndex + 1 -ge $args.Count) {
+                      throw "fake gh release download did not receive --dir"
+                  }
+                  $destination = $args[$dirIndex + 1]
+                  Copy-Item (Join-Path $env:SBXR_TEST_RELEASE_DIR $env:SBXR_TEST_ARCHIVE) $destination
+                  Copy-Item (Join-Path $env:SBXR_TEST_RELEASE_DIR "SHA256SUMS") $destination
+                  $global:LASTEXITCODE = 0
+                  return
+              }
+              throw "unexpected fake gh command: $($args -join ' ')"
+          }
+          ./install.ps1
+          if ((& "$env:SBXR_INSTALL_DIR\sbxr.exe" --version) -ne "sbxr $env:SBXR_TEST_VERSION") {
+              throw "automatic-discovery installer smoke test failed"
+          }
       - name: Upload the release archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -162,3 +245,74 @@ jobs:
             --title "sbxr $version" \
             --generate-notes \
             release/*
+
+  published-install-smoke:
+    name: Verify published install on ${{ matrix.target }}
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            windows: false
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            windows: false
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            windows: false
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            windows: true
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      attestations: read
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download, verify, and run the published Unix installer
+        if: ${{ !matrix.windows }}
+        shell: bash
+        run: |
+          version="$GITHUB_REF_NAME"
+          work="$RUNNER_TEMP/sbxr-published-installer"
+          install_dir="$RUNNER_TEMP/sbxr-published-bin"
+          mkdir -p "$work"
+          cd "$work"
+          gh release download "$version" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern install.sh
+          gh attestation verify install.sh \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-ref "refs/tags/$version" \
+            --deny-self-hosted-runners
+          SBXR_INSTALL_DIR="$install_dir" sh install.sh
+          test "$("$install_dir/sbxr" --version)" = "sbxr $version"
+      - name: Download, verify, and run the published Windows installer
+        if: ${{ matrix.windows }}
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME
+          $work = Join-Path $env:RUNNER_TEMP "sbxr-published-installer"
+          $installDir = Join-Path $env:RUNNER_TEMP "sbxr-published-bin"
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          & gh release download $version `
+            --repo $env:GITHUB_REPOSITORY `
+            --pattern install.ps1 `
+            --dir $work
+          if ($LASTEXITCODE -ne 0) { throw "published installer download failed" }
+          $installer = Join-Path $work "install.ps1"
+          & gh attestation verify $installer `
+            --repo $env:GITHUB_REPOSITORY `
+            --signer-workflow "$env:GITHUB_REPOSITORY/.github/workflows/release.yml" `
+            --source-ref "refs/tags/$version" `
+            --deny-self-hosted-runners
+          if ($LASTEXITCODE -ne 0) { throw "published installer attestation verification failed" }
+          & $installer -InstallDir $installDir
+          if ((& "$installDir\sbxr.exe" --version) -ne "sbxr $version") {
+              throw "published installer smoke test failed"
+          }
