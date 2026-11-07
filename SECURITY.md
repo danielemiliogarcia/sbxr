@@ -71,6 +71,15 @@ unsupported-secret boundaries are described in
   Docker's forwarded host SSH agent; private SSH keys are not copied into the
   VM. Automatic commit/tag signing follows the host project's effective Git
   defaults only when its signing format is SSH.
+- Shared-workspace host signing first stops every discoverable running
+  sbxr-managed sandbox that can reach the repository. It rejects symlinked or
+  unregistered out-of-tree Git metadata, repository executable hooks, includes,
+  executable helpers, and non-allowlisted local settings. The signing path uses
+  absolute host Git/GPG programs, trusted global/system identity and signing
+  configuration, disabled hooks and prompts, scrubbed `GIT_*` variables, and
+  `git commit-tree -S`. It cryptographically verifies each replacement object
+  before an old-value-checked atomic ref update; no checkout, rebase, filter, or
+  merge driver is involved. `status` and `verify` repeat the local Git audit.
 - Safe config mirroring excludes credential, history, session, log, project
   trust, and runtime-state files. Claude settings additionally drop
   credential-shaped fields; Pi model configuration drops literal API-key and
@@ -107,7 +116,10 @@ unsupported-secret boundaries are described in
 - Malicious code already present in a crate needs no second network request.
 - Allowed registries, GitHub, agent, npm, and VS Code hosts remain reachable;
   hostname allowlisting cannot validate every object served by them.
-- Direct mode lets sandbox code modify the selected project and `.git`.
+- Direct mode lets sandbox code modify the selected project and `.git`. That
+  includes repository-local config and hooks that plain host Git may execute.
+  sbxr's status, verification, and host-signing paths audit this surface, but
+  commands run directly as `git ...` on the host are not wrapped or protected.
 - Clone-mode `isolated` removes that writable host workspace mount, but its
   sandbox-local clone is not a replacement for reviewed backups or pushes.
 - Sandbox-local caches, agent history/login state, tool installations, and
@@ -123,13 +135,14 @@ unsupported-secret boundaries are described in
 - Docker does not forward OpenPGP/GPG, YubiKey GPG, or S/MIME signers. When the
   host requires one, `sbxr` warns and disables automatic sandbox signing;
   sandbox commits are unsigned and must be signed or re-signed on the host.
-  `sbxr commit-pgp-sign` performs that amend through host Git/GPG with project
-  hooks disabled, refuses staged changes and in-progress Git operations, and
-  confirms that the new commit contains an OpenPGP signature.
+  `sbxr commit-pgp-sign` reconstructs the commit through pinned host Git/GPG
+  with hooks and executable local settings neutralized, refuses staged changes
+  and in-progress Git operations, and verifies the new OpenPGP signature before
+  atomically moving the branch.
 - Multi-commit OpenPGP signing necessarily rewrites history. sbxr restricts it
-  to a clean, linear, same-author suffix, creates a recovery ref, disables
-  hooks, verifies the unchanged final tree and every new signature, and aborts
-  automatically on signing failure. It does not push rewritten history;
+  to an unchanged-index, linear, same-author suffix, creates a recovery ref,
+  verifies the unchanged final tree and every new signature, and leaves the
+  branch unchanged on signing failure. It does not push rewritten history;
   publishing it remains an explicit `git push --force-with-lease` decision.
 - Normal development windows disable VS Code Workspace Trust for that session
   because the microVM is the execution boundary; clone-mode `review` windows

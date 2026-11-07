@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.3.7] - 2026-11-07
+
+### Security
+
+- Hardened the host-only OpenPGP/YubiKey workflow against a sandbox that has
+  modified the shared `.git` directory. `sbxr commit-pgp-sign` now stops every
+  discoverable running sbxr sandbox whose shared workspace can reach the
+  repository, rejects symlinked or unregistered out-of-tree metadata,
+  executable hooks, includes, executable helpers, foreign signing keys, and
+  every non-allowlisted repository setting before host Git or GPG can act.
+- Host signing now resolves absolute host Git/GPG programs and identity from
+  trusted global/system configuration, scrubs inherited Git environment,
+  disables hooks, fsmonitor, pagers, editors, prompts, replacement objects,
+  and repository-selected signing behavior, then reconstructs signed commit
+  objects with `git commit-tree -S`. Each object is cryptographically verified
+  before an old-value-checked atomic ref update; no checkout, rebase, filter,
+  or merge driver runs.
+- `sbxr status` and `sbxr verify` now perform a fresh redacted audit of shared
+  repository config, hooks, worktree metadata, and signing-key consistency.
+  Host-Git findings are recorded separately in the protected health ledger and
+  do not incorrectly suggest that sandbox repair can fix host repository state.
+
+### Changed
+
+- Multi-commit signing retains its recovery ref and linear same-author policy,
+  but reconstructs the commit suffix directly instead of rebasing it. Unstaged
+  and untracked files remain untouched; signing failure leaves the branch ref
+  unchanged. Documentation now states the residual risk of using plain host
+  Git directly on a guest-writable shared checkout.
+- Linux lifecycle shutdown now prefers the targeted `wmctrl` Remote-SSH window
+  path when it is available, avoiding a slow `code --status` query before
+  stopping a sandbox. Platforms without that window manager retain the guarded
+  VS Code CLI fallback.
+- Updated the sbx-suite comparison with the interactive-versus-unattended
+  threat model, separate signing and push authority, and the implemented shared
+  `.git` defenses.
+
+### Tests
+
+- Added behavioral coverage proving that dangerous local Git settings are
+  detected without executing marker commands, executable hooks and symlinked
+  metadata fail closed, only relevant shared environments are selected for
+  quiescence, and host-Git attention does not produce a false repair hint.
+
 ## [0.3.6] - 2026-11-07
 
 ### Security

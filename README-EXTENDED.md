@@ -242,7 +242,12 @@ or host-global policy.
 
 In the default direct mode, the host and sandbox see the same working tree and
 the same `.git` directory. You may inspect, stage, commit, and push from either
-side; do not run competing Git mutations on both sides at the same time.
+side; do not run competing Git mutations on both sides at the same time. A
+sandbox process can also modify repository-local Git configuration and hooks.
+`sbxr status` and `sbxr verify` inspect those host-execution surfaces without
+printing configuration values. Plain host `git` commands are outside sbxr's
+wrapper and can still trust a malicious local setting or hook, so review the
+audit before using host Git on a shared checkout.
 
 On first bootstrap, `sbxr` installs `nano` as Git's editor, enables Bash/Git
 completion, mirrors the host's global `user.name` and `user.email`, installs
@@ -282,11 +287,23 @@ the host-mounted checkout:
 sbxr commit-pgp-sign .
 ```
 
-The command refuses staged changes or an in-progress merge/rebase operation,
-disables repository Git hooks for the signing-only amend, forces Git's OpenPGP
-backend, and verifies that the resulting `HEAD` contains an OpenPGP signature.
-Git invokes the host GPG agent, so the YubiKey, PIN entry, touch confirmation,
-and private key remain on the host. Unstaged and untracked files are preserved.
+Before signing, the command stops every running sbxr-managed sandbox whose
+shared workspace can reach the repository and closes its matching VS Code
+window. It then rejects symlinked or unregistered out-of-tree Git metadata,
+executable hooks, dangerous local settings, and any local setting outside its
+explicit allowlist. Git and GPG are resolved from the host, repository hooks
+are disabled, executable Git settings are pinned to inert or host-owned values,
+and the author/committer/signing identity comes from trusted global or system
+host configuration rather than the writable repository.
+
+The command refuses staged changes or an in-progress merge/rebase operation.
+It reads the existing commit object and creates a signed replacement with
+`git commit-tree -S`; it does not check out files, invoke filters or merge
+drivers, or perform a rebase. Only after cryptographic verification succeeds
+does it atomically update the branch with an old-value compare. Git invokes the
+host GPG agent, so the YubiKey, PIN entry, touch confirmation, and private key
+remain on the host. Unstaged and untracked files are preserved. Restart a
+stopped development sandbox afterward with `sbxr up .`.
 
 To sign a linear suffix of unpublished commits authored with the repository's
 effective `user.email`, use:
@@ -301,14 +318,16 @@ sbxr commit-pgp-sign --range origin/main..HEAD .
 starts at the earliest unsigned matching commit. Adding a signature changes a
 commit ID, so every descendant in that suffix is recreated and re-signed,
 including descendants that were already signed. History mode therefore
-requires a completely clean worktree, an attached branch, no merge/root commit
+requires an unchanged index, an attached branch, no merge/root commit
 in the rewritten suffix, and no differently authored descendant. Before the
 rewrite it prints every affected commit and asks for confirmation; `-y` skips
 that confirmation but never bypasses YubiKey PIN/touch prompts.
 
-sbxr creates a `refs/sbxr/commit-pgp-sign/...` recovery ref, disables project
-hooks, verifies the final tree and every resulting OpenPGP signature, and
-automatically aborts to the original branch if signing fails. It never pushes.
+sbxr creates a `refs/sbxr/commit-pgp-sign/...` recovery ref, reconstructs the
+linear suffix without a rebase, verifies the final tree and every resulting
+OpenPGP signature, and leaves the branch unchanged if signing fails. The final
+reference update is atomic and fails if another host process moved the branch.
+It never pushes.
 If the old commits were already published, inspect the result carefully and
 run `git push --force-with-lease` yourself; this rewrite cannot be a
 fast-forward.
@@ -1001,6 +1020,8 @@ mirror them from a trusted host profile.
 - `src/profile.rs`: protected profiles, resource validation, and wizard;
 - `src/diagnostics.rs`: redacted structured reports;
 - `src/health.rs`: protected resumable integration-health records;
+- `src/git_trust.rs`: fail-closed shared-repository metadata and local Git
+  configuration auditing plus trusted host Git/GPG command construction;
 - `src/environment.rs`: runtime context, project identity, sandbox names, and
   optional host RocksDB validation;
 - `src/envfile.rs`: protected declarative environments and desired/applied

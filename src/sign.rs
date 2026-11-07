@@ -1,21 +1,26 @@
 use crate::cli::SignSelection;
+use crate::git_trust::{self, HostConfig, RepositoryLayout};
 use crate::process;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const REBASE_SIGN_COMMAND: &str = "git -c core.hooksPath=/dev/null -c gpg.format=openpgp commit --amend --allow-empty --no-edit --no-verify -S";
-
 struct Commit {
     id: String,
+    tree: String,
     parents: Vec<String>,
+    author_name: String,
     author_email: String,
+    author_date: String,
+    encoding: Option<String>,
+    message: Vec<u8>,
     summary: String,
     openpgp_signed: bool,
 }
 
 struct RewritePlan {
+    branch_ref: String,
     branch: String,
     author_email: String,
     boundary: String,
@@ -45,45 +50,37 @@ pub(crate) fn commit_pgp_sign(
         ));
     }
 
-    let repository = repository_root(&requested)?;
-    reject_in_progress_operation(&repository)?;
+    let trusted = HostConfig::load_for_signing(&requested)?;
+    let audit = git_trust::audit(&requested, Some(&trusted.signing_key))?
+        .ok_or_else(|| format!("no Git repository contains {}", requested.display()))?;
+    trusted.ensure_programs_outside(&audit.layout.root)?;
+    audit.print();
+    if !audit.signing_allowed() {
+        return Err(audit.rejection());
+    }
+    let repository = &audit.layout.root;
+    reject_in_progress_operation(&audit.layout)?;
     match selection {
-        SignSelection::Head => sign_head(&repository),
+        SignSelection::Head => sign_head(&trusted, repository),
         SignSelection::AllMine | SignSelection::Range(_) => {
-            sign_history(&repository, selection, approved)
+            sign_history(&trusted, repository, selection, approved)
         }
     }
 }
 
-fn sign_head(repository: &Path) -> Result<(), String> {
-    let old_head = resolve_revision(repository, "HEAD")?;
-    reject_staged_changes(repository)?;
+fn sign_head(trusted: &HostConfig, repository: &Path) -> Result<(), String> {
+    let old_head = resolve_revision(trusted, repository, "HEAD")?;
+    let commit = read_commit(trusted, repository, &old_head)?;
+    reject_staged_changes(trusted, repository, &commit.tree)?;
 
-    let summary = commit_summary(repository, &old_head)?;
-    println!("==> OpenPGP-signing host commit {summary}");
+    println!("==> OpenPGP-signing host commit {}", commit.summary);
     println!("    repository: {}", repository.display());
-    println!("    Git hooks are disabled for this signing-only amend.");
+    println!("    Git hooks and repository-controlled executable config are disabled.");
 
-    let status = git(repository)
-        .args([
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "gpg.format=openpgp",
-            "commit",
-            "--amend",
-            "--no-edit",
-            "--no-verify",
-            "-S",
-        ])
-        .status()
-        .map_err(|error| format!("could not run host Git OpenPGP signing: {error}"))?;
-    if !status.success() {
-        return Err(signing_failure(status));
-    }
-
-    let new_head = resolve_revision(repository, "HEAD")?;
-    verify_openpgp_commit(repository, &new_head)?;
+    let new_head = sign_commit(trusted, repository, &commit, &commit.parents)?;
+    verify_openpgp_commit(trusted, repository, &new_head)?;
+    let reference = current_reference(trusted, repository).unwrap_or_else(|_| "HEAD".to_owned());
+    update_reference(trusted, repository, &reference, &new_head, &old_head)?;
     println!("signed: {old_head} -> {new_head}");
     println!(
         "verify: git -C {} verify-commit HEAD",
@@ -93,12 +90,15 @@ fn sign_head(repository: &Path) -> Result<(), String> {
 }
 
 fn sign_history(
+    trusted: &HostConfig,
     repository: &Path,
     selection: &SignSelection,
     approved: bool,
 ) -> Result<(), String> {
-    reject_dirty_worktree(repository)?;
-    let Some(plan) = build_rewrite_plan(repository, selection)? else {
+    let old_head = resolve_revision(trusted, repository, "HEAD")?;
+    let old_tree = resolve_object(trusted, repository, "HEAD^{tree}")?;
+    reject_staged_changes(trusted, repository, &old_tree)?;
+    let Some(plan) = build_rewrite_plan(trusted, repository, selection)? else {
         println!("all matching commits are already OpenPGP-signed; no history was changed");
         return Ok(());
     };
@@ -111,47 +111,29 @@ fn sign_history(
         return Ok(());
     }
 
-    let backup = create_backup(repository, &plan.old_head)?;
+    let backup = create_backup(trusted, repository, &plan.old_head)?;
     println!("==> recovery ref created: {backup}");
     println!(
         "==> rewriting and OpenPGP-signing {} commit(s)",
         plan.commits.len()
     );
-    let status = git(repository)
-        .args([
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "gpg.format=openpgp",
-            "-c",
-            "commit.gpgSign=false",
-            "rebase",
-            "--force-rebase",
-            "--empty=keep",
-            "--exec",
-            REBASE_SIGN_COMMAND,
-            &plan.base,
-        ])
-        .env("GIT_EDITOR", "true")
-        .env("GIT_SEQUENCE_EDITOR", ":")
-        .status()
-        .map_err(|error| format!("could not start host Git history signing: {error}"))?;
-    if !status.success() {
-        let aborted = git(repository)
-            .args(["-c", "core.hooksPath=/dev/null", "rebase", "--abort"])
-            .status()
-            .is_ok_and(|status| status.success());
+    let mut parent = plan.base.clone();
+    for commit in &plan.commits {
+        let signed = sign_commit(trusted, repository, commit, &[parent])
+            .map_err(|error| format!("{error}\nRecovery ref: {backup}"))?;
+        verify_openpgp_commit(trusted, repository, &signed)
+            .map_err(|error| format!("{error}\nRecovery ref: {backup}"))?;
+        parent = signed;
+    }
+    let new_head = parent;
+    let new_tree = resolve_object(trusted, repository, &format!("{new_head}^{{tree}}"))?;
+    if new_tree != plan.old_tree {
         return Err(format!(
-            "host OpenPGP history signing failed with {status}. {}\nRecovery ref: {backup}\nVerify the YubiKey, PIN/touch prompt, and Git signing configuration, then retry.",
-            if aborted {
-                "The rebase was aborted and the original branch was restored."
-            } else {
-                "Git could not abort the rebase automatically; inspect `git status` before continuing."
-            }
+            "signed history has an unexpected final tree; the branch was not changed\nRecovery ref: {backup}"
         ));
     }
-
-    let new_head = verify_rewrite(repository, &plan, &backup)?;
+    update_reference(trusted, repository, &plan.branch_ref, &new_head, &old_head)
+        .map_err(|error| format!("{error}\nRecovery ref: {backup}"))?;
     println!("signed {} commit(s)", plan.commits.len());
     println!("branch: {}", plan.branch);
     println!("old HEAD: {}", plan.old_head);
@@ -169,30 +151,30 @@ fn sign_history(
 }
 
 fn build_rewrite_plan(
+    trusted: &HostConfig,
     repository: &Path,
     selection: &SignSelection,
 ) -> Result<Option<RewritePlan>, String> {
-    let old_head = resolve_revision(repository, "HEAD")?;
-    let branch = git_text(
+    let old_head = resolve_revision(trusted, repository, "HEAD")?;
+    let branch_ref = git_text(
+        trusted,
         repository,
-        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        &["symbolic-ref", "--quiet", "HEAD"],
         "resolving the current branch",
     )
     .map_err(|_| {
         "history signing requires an attached branch; detached HEAD is not supported".to_owned()
     })?;
-    let author_email = git_text(
-        repository,
-        &["config", "--get", "user.email"],
-        "reading the effective Git user.email",
-    )
-    .map_err(|_| {
-        "history signing requires an effective Git user.email to identify your commits".to_owned()
-    })?;
+    let branch = branch_ref
+        .strip_prefix("refs/heads/")
+        .unwrap_or(&branch_ref)
+        .to_owned();
+    let author_email = trusted.user_email.clone();
 
     let (boundary, range_base) = match selection {
         SignSelection::AllMine => {
             let upstream = git_text(
+                trusted,
                 repository,
                 &[
                     "rev-parse",
@@ -206,13 +188,13 @@ fn build_rewrite_plan(
                 "--all-mine requires a configured upstream; use --range BASE..HEAD when the branch has no upstream"
                     .to_owned()
             })?;
-            let base = resolve_revision(repository, &upstream)?;
+            let base = resolve_revision(trusted, repository, &upstream)?;
             (upstream, base)
         }
         SignSelection::Range(range) => {
             let (left, right) = parse_explicit_range(range)?;
-            let base = resolve_revision(repository, left)?;
-            let selected_head = resolve_revision(repository, right)?;
+            let base = resolve_revision(trusted, repository, left)?;
+            let selected_head = resolve_revision(trusted, repository, right)?;
             if selected_head != old_head {
                 return Err(format!(
                     "--range must end at the current HEAD; {right} resolves to {selected_head}"
@@ -222,10 +204,11 @@ fn build_rewrite_plan(
         }
         SignSelection::Head => unreachable!(),
     };
-    require_ancestor(repository, &range_base, &old_head)?;
+    require_ancestor(trusted, repository, &range_base, &old_head)?;
 
     let range = format!("{range_base}..{old_head}");
     let ids = git_lines(
+        trusted,
         repository,
         &["rev-list", "--reverse", "--topo-order", &range],
         "listing commits selected for history signing",
@@ -237,7 +220,7 @@ fn build_rewrite_plan(
     }
     let mut candidates = Vec::with_capacity(ids.len());
     for id in ids {
-        candidates.push(read_commit(repository, &id)?);
+        candidates.push(read_commit(trusted, repository, &id)?);
     }
     let Some(first_unsigned) = candidates.iter().position(|commit| {
         author_matches(&commit.author_email, &author_email) && !commit.openpgp_signed
@@ -251,8 +234,9 @@ fn build_rewrite_plan(
         .iter()
         .filter(|commit| !commit.openpgp_signed)
         .count();
-    let old_tree = resolve_object(repository, "HEAD^{tree}")?;
+    let old_tree = resolve_object(trusted, repository, "HEAD^{tree}")?;
     Ok(Some(RewritePlan {
+        branch_ref,
         branch,
         author_email,
         boundary,
@@ -329,7 +313,11 @@ fn confirm_rewrite() -> Result<bool, String> {
     ))
 }
 
-fn create_backup(repository: &Path, old_head: &str) -> Result<String, String> {
+fn create_backup(
+    trusted: &HostConfig,
+    repository: &Path,
+    old_head: &str,
+) -> Result<String, String> {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("host clock is before the Unix epoch: {error}"))?
@@ -340,6 +328,7 @@ fn create_backup(repository: &Path, old_head: &str) -> Result<String, String> {
         std::process::id()
     );
     git_run_checked(
+        trusted,
         repository,
         &[
             "update-ref",
@@ -353,76 +342,218 @@ fn create_backup(repository: &Path, old_head: &str) -> Result<String, String> {
     Ok(reference)
 }
 
-fn verify_rewrite(repository: &Path, plan: &RewritePlan, backup: &str) -> Result<String, String> {
-    let new_head = resolve_revision(repository, "HEAD")?;
-    let new_tree = resolve_object(repository, "HEAD^{tree}")?;
-    if new_tree != plan.old_tree {
-        return Err(format!(
-            "history signing completed, but the HEAD tree changed unexpectedly; inspect the branch before pushing\nRecovery ref: {backup}"
-        ));
-    }
-    let range = format!("{}..{new_head}", plan.base);
-    let ids = git_lines(
-        repository,
-        &["rev-list", "--reverse", "--topo-order", &range],
-        "verifying rewritten commits",
-    )?;
-    if ids.len() != plan.commits.len() {
-        return Err(format!(
-            "history signing rewrote an unexpected number of commits; expected {}, found {}\nRecovery ref: {backup}",
-            plan.commits.len(),
-            ids.len()
-        ));
-    }
-    for id in ids {
-        let commit = read_commit(repository, &id)?;
-        if !author_matches(&commit.author_email, &plan.author_email) {
-            return Err(format!(
-                "rewritten commit {} has an unexpected author; inspect before pushing\nRecovery ref: {backup}",
-                commit.summary
-            ));
-        }
-        verify_openpgp_commit(repository, &id).map_err(|error| {
-            format!("{error}\nThe rewritten branch remains available for inspection.\nRecovery ref: {backup}")
-        })?;
-    }
-    Ok(new_head)
-}
-
-fn read_commit(repository: &Path, id: &str) -> Result<Commit, String> {
-    let parents = git_text_allow_empty(
-        repository,
-        &["show", "-s", "--format=%P", id],
-        "reading commit parents",
-    )?
-    .split_whitespace()
-    .map(ToOwned::to_owned)
-    .collect::<Vec<_>>();
-    let author_email = git_text(
-        repository,
-        &["show", "-s", "--format=%ae", id],
-        "reading commit author",
-    )?;
-    let summary = commit_summary(repository, id)?;
+fn read_commit(trusted: &HostConfig, repository: &Path, id: &str) -> Result<Commit, String> {
     let bytes = git_bytes(
+        trusted,
         repository,
         &["cat-file", "commit", id],
         "reading the commit object",
     )?;
+    parse_commit(id, &bytes)
+}
+
+fn parse_commit(id: &str, bytes: &[u8]) -> Result<Commit, String> {
+    let separator = bytes
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .ok_or_else(|| format!("commit {id} has no header separator"))?;
+    let headers = &bytes[..separator];
+    let message = bytes[separator + 2..].to_vec();
+    let mut tree = None;
+    let mut parents = Vec::new();
+    let mut author = None;
+    let mut encoding = None;
+    let mut continuation = false;
+    for line in headers.split(|byte| *byte == b'\n') {
+        if line.first() == Some(&b' ') {
+            if continuation {
+                continue;
+            }
+            return Err(format!("commit {id} has an unexpected continued header"));
+        }
+        continuation = false;
+        let separator = line
+            .iter()
+            .position(|byte| *byte == b' ')
+            .ok_or_else(|| format!("commit {id} has a malformed header"))?;
+        let (name, value_with_space) = line.split_at(separator);
+        let value = &value_with_space[1..];
+        match name {
+            b"tree" => tree = Some(ascii_object_id(value, "tree", id)?),
+            b"parent" => parents.push(ascii_object_id(value, "parent", id)?),
+            b"author" => author = Some(parse_author(value, id)?),
+            b"committer" => {}
+            b"encoding" => {
+                let value = std::str::from_utf8(value)
+                    .map_err(|_| format!("commit {id} has a non-UTF-8 encoding header"))?;
+                if value.is_empty()
+                    || !value.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                    })
+                {
+                    return Err(format!("commit {id} has an unsafe encoding header"));
+                }
+                encoding = Some(value.to_owned());
+            }
+            b"gpgsig" | b"gpgsig-sha256" => continuation = true,
+            _ => {
+                return Err(format!(
+                    "commit {id} contains unsupported header {}; refusing to reconstruct it",
+                    String::from_utf8_lossy(name)
+                ));
+            }
+        }
+    }
+    let tree = tree.ok_or_else(|| format!("commit {id} has no tree"))?;
+    let (author_name, author_email, author_date) =
+        author.ok_or_else(|| format!("commit {id} has no author"))?;
+    let subject = String::from_utf8_lossy(&message)
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("<empty message>")
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(72)
+        .collect::<String>();
+    let short = id.get(..12).unwrap_or(id);
     Ok(Commit {
         id: id.to_owned(),
+        tree,
         parents,
+        author_name,
         author_email,
-        summary,
-        openpgp_signed: has_openpgp_signature(&bytes),
+        author_date,
+        encoding,
+        message,
+        summary: format!("{short} {subject}"),
+        openpgp_signed: has_openpgp_signature(bytes),
     })
 }
 
-fn commit_summary(repository: &Path, id: &str) -> Result<String, String> {
+fn parse_author(value: &[u8], id: &str) -> Result<(String, String, String), String> {
+    let value = std::str::from_utf8(value)
+        .map_err(|_| format!("commit {id} has a non-UTF-8 author identity"))?;
+    let email_end = value
+        .rfind('>')
+        .ok_or_else(|| format!("commit {id} has a malformed author identity"))?;
+    let email_start = value[..email_end]
+        .rfind('<')
+        .ok_or_else(|| format!("commit {id} has a malformed author identity"))?;
+    let name = value[..email_start].trim_end();
+    let email = &value[email_start + 1..email_end];
+    let mut date = value[email_end + 1..].split_whitespace();
+    let timestamp = date
+        .next()
+        .ok_or_else(|| format!("commit {id} has no author timestamp"))?;
+    let timezone = date
+        .next()
+        .ok_or_else(|| format!("commit {id} has no author timezone"))?;
+    if date.next().is_some()
+        || name.is_empty()
+        || email.is_empty()
+        || !timestamp.bytes().all(|byte| byte.is_ascii_digit())
+        || timezone.len() != 5
+        || !matches!(timezone.as_bytes()[0], b'+' | b'-')
+        || !timezone.as_bytes()[1..].iter().all(u8::is_ascii_digit)
+    {
+        return Err(format!("commit {id} has an unsafe author identity or date"));
+    }
+    Ok((
+        name.to_owned(),
+        email.to_owned(),
+        format!("@{timestamp} {timezone}"),
+    ))
+}
+
+fn ascii_object_id(value: &[u8], header: &str, id: &str) -> Result<String, String> {
+    let value =
+        std::str::from_utf8(value).map_err(|_| format!("commit {id} has a non-ASCII {header}"))?;
+    if matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(value.to_owned())
+    } else {
+        Err(format!("commit {id} has an invalid {header} object ID"))
+    }
+}
+
+fn sign_commit(
+    trusted: &HostConfig,
+    repository: &Path,
+    commit: &Commit,
+    parents: &[String],
+) -> Result<String, String> {
+    let mut command = git(trusted, repository);
+    command
+        .arg("-c")
+        .arg(format!(
+            "i18n.commitEncoding={}",
+            commit.encoding.as_deref().unwrap_or("UTF-8")
+        ))
+        .args(["commit-tree", &commit.tree]);
+    for parent in parents {
+        command.args(["-p", parent]);
+    }
+    command
+        .arg("-S")
+        .env("GIT_AUTHOR_NAME", &commit.author_name)
+        .env("GIT_AUTHOR_EMAIL", &commit.author_email)
+        .env("GIT_AUTHOR_DATE", &commit.author_date)
+        .env("GIT_COMMITTER_NAME", &trusted.user_name)
+        .env("GIT_COMMITTER_EMAIL", &trusted.user_email)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("could not start host Git OpenPGP signing: {error}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or("host Git signing has no message input")?
+        .write_all(&commit.message)
+        .map_err(|error| format!("could not supply the original commit message: {error}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("could not finish host Git OpenPGP signing: {error}"))?;
+    if !output.status.success() {
+        return Err(signing_failure(output.status));
+    }
+    let id = String::from_utf8(output.stdout)
+        .map_err(|_| "host Git signing returned a non-UTF-8 object ID".to_owned())?;
+    let id = id.trim();
+    if !matches!(id.len(), 40 | 64) || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("host Git signing returned an invalid object ID".to_owned());
+    }
+    Ok(id.to_owned())
+}
+
+fn current_reference(trusted: &HostConfig, repository: &Path) -> Result<String, String> {
     git_text(
+        trusted,
         repository,
-        &["show", "-s", "--format=%h %s", id],
-        "reading the commit summary",
+        &["symbolic-ref", "--quiet", "HEAD"],
+        "resolving the current branch reference",
+    )
+}
+
+fn update_reference(
+    trusted: &HostConfig,
+    repository: &Path,
+    reference: &str,
+    new: &str,
+    old: &str,
+) -> Result<(), String> {
+    git_run_checked(
+        trusted,
+        repository,
+        &[
+            "update-ref",
+            "-m",
+            "sbxr commit-pgp-sign",
+            reference,
+            new,
+            old,
+        ],
+        "atomically updating the signed host branch",
     )
 }
 
@@ -439,31 +570,46 @@ fn parse_explicit_range(range: &str) -> Result<(&str, &str), String> {
     Ok((left, right))
 }
 
-fn resolve_revision(repository: &Path, revision: &str) -> Result<String, String> {
+fn resolve_revision(
+    trusted: &HostConfig,
+    repository: &Path,
+    revision: &str,
+) -> Result<String, String> {
     if revision.starts_with('-') || revision.chars().any(char::is_whitespace) {
         return Err(format!("unsafe Git revision: {revision}"));
     }
     let revision = format!("{revision}^{{commit}}");
     git_text(
+        trusted,
         repository,
         &["rev-parse", "--verify", "--end-of-options", &revision],
         "resolving a Git revision",
     )
 }
 
-fn resolve_object(repository: &Path, revision: &str) -> Result<String, String> {
+fn resolve_object(
+    trusted: &HostConfig,
+    repository: &Path,
+    revision: &str,
+) -> Result<String, String> {
     if revision.starts_with('-') || revision.chars().any(char::is_whitespace) {
         return Err(format!("unsafe Git object revision: {revision}"));
     }
     git_text(
+        trusted,
         repository,
         &["rev-parse", "--verify", "--end-of-options", revision],
         "resolving a Git object",
     )
 }
 
-fn require_ancestor(repository: &Path, base: &str, head: &str) -> Result<(), String> {
-    let status = git(repository)
+fn require_ancestor(
+    trusted: &HostConfig,
+    repository: &Path,
+    base: &str,
+    head: &str,
+) -> Result<(), String> {
+    let status = git(trusted, repository)
         .args(["merge-base", "--is-ancestor", base, head])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -477,40 +623,28 @@ fn require_ancestor(repository: &Path, base: &str, head: &str) -> Result<(), Str
     }
 }
 
-fn reject_dirty_worktree(repository: &Path) -> Result<(), String> {
-    let output = git_bytes(
+fn reject_staged_changes(
+    trusted: &HostConfig,
+    repository: &Path,
+    expected_tree: &str,
+) -> Result<(), String> {
+    let index_tree = git_text(
+        trusted,
         repository,
-        &["status", "--porcelain=v1", "--untracked-files=normal", "-z"],
-        "checking the host worktree before history signing",
+        &["write-tree"],
+        "reading the host index tree before signing",
     )?;
-    if output.is_empty() {
+    if index_tree == expected_tree {
         Ok(())
     } else {
-        Err("history signing requires a completely clean worktree and index, including no untracked files".to_owned())
-    }
-}
-
-fn reject_staged_changes(repository: &Path) -> Result<(), String> {
-    let status = git(repository)
-        .args(["diff", "--cached", "--quiet", "HEAD", "--"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|error| format!("could not inspect staged host changes: {error}"))?;
-    match status.code() {
-        Some(0) => Ok(()),
-        Some(1) => Err(
+        Err(
             "refusing to sign while the index has staged changes; commit or unstage them first so signing cannot silently alter the commit tree"
                 .to_owned(),
-        ),
-        _ => Err(format!(
-            "could not compare the host index with HEAD: {status}"
-        )),
+        )
     }
 }
 
-fn reject_in_progress_operation(repository: &Path) -> Result<(), String> {
+fn reject_in_progress_operation(layout: &RepositoryLayout) -> Result<(), String> {
     for marker in [
         "MERGE_HEAD",
         "CHERRY_PICK_HEAD",
@@ -520,18 +654,9 @@ fn reject_in_progress_operation(repository: &Path) -> Result<(), String> {
         "rebase-apply",
         "sequencer",
     ] {
-        let path = git_text(
-            repository,
-            &["rev-parse", "--git-path", marker],
-            "inspecting the host Git operation state",
-        )?;
-        let path = PathBuf::from(path);
-        let path = if path.is_absolute() {
-            path
-        } else {
-            repository.join(path)
-        };
-        if path.exists() {
+        let in_git_dir = layout.git_dir.join(marker);
+        let in_common_dir = layout.common_dir.join(marker);
+        if in_git_dir.exists() || in_common_dir.exists() {
             return Err(format!(
                 "refusing to amend history while a Git operation is in progress ({marker})"
             ));
@@ -540,19 +665,9 @@ fn reject_in_progress_operation(repository: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn repository_root(requested: &Path) -> Result<PathBuf, String> {
-    let root = git_text(
-        requested,
-        &["rev-parse", "--show-toplevel"],
-        "locating the host Git repository",
-    )?;
-    PathBuf::from(root)
-        .canonicalize()
-        .map_err(|error| format!("host Git reported an unavailable repository root: {error}"))
-}
-
-fn verify_openpgp_commit(repository: &Path, id: &str) -> Result<(), String> {
+fn verify_openpgp_commit(trusted: &HostConfig, repository: &Path, id: &str) -> Result<(), String> {
     let commit = git_bytes(
+        trusted,
         repository,
         &["cat-file", "commit", id],
         "checking the signed commit",
@@ -562,8 +677,8 @@ fn verify_openpgp_commit(repository: &Path, id: &str) -> Result<(), String> {
             "commit {id} has no OpenPGP signature after signing"
         ));
     }
-    let status = git(repository)
-        .args(["-c", "gpg.format=openpgp", "verify-commit", id])
+    let status = git(trusted, repository)
+        .args(["verify-commit", id])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -588,14 +703,17 @@ fn signing_failure(status: ExitStatus) -> String {
     )
 }
 
-fn git(repository: &Path) -> Command {
-    let mut command = Command::new("git");
-    command.arg("-C").arg(repository);
-    command
+fn git(trusted: &HostConfig, repository: &Path) -> Command {
+    trusted.command(repository)
 }
 
-fn git_run_checked(repository: &Path, args: &[&str], description: &str) -> Result<(), String> {
-    let status = git(repository)
+fn git_run_checked(
+    trusted: &HostConfig,
+    repository: &Path,
+    args: &[&str],
+    description: &str,
+) -> Result<(), String> {
+    let status = git(trusted, repository)
         .args(args)
         .status()
         .map_err(|error| format!("could not run {description}: {error}"))?;
@@ -606,8 +724,13 @@ fn git_run_checked(repository: &Path, args: &[&str], description: &str) -> Resul
     }
 }
 
-fn git_lines(repository: &Path, args: &[&str], description: &str) -> Result<Vec<String>, String> {
-    let text = git_text_allow_empty(repository, args, description)?;
+fn git_lines(
+    trusted: &HostConfig,
+    repository: &Path,
+    args: &[&str],
+    description: &str,
+) -> Result<Vec<String>, String> {
+    let text = git_text_allow_empty(trusted, repository, args, description)?;
     Ok(text
         .lines()
         .map(str::trim)
@@ -616,8 +739,13 @@ fn git_lines(repository: &Path, args: &[&str], description: &str) -> Result<Vec<
         .collect())
 }
 
-fn git_text(repository: &Path, args: &[&str], description: &str) -> Result<String, String> {
-    let text = git_text_allow_empty(repository, args, description)?;
+fn git_text(
+    trusted: &HostConfig,
+    repository: &Path,
+    args: &[&str],
+    description: &str,
+) -> Result<String, String> {
+    let text = git_text_allow_empty(trusted, repository, args, description)?;
     if text.is_empty() {
         Err(format!("{description} returned an empty value"))
     } else {
@@ -626,18 +754,24 @@ fn git_text(repository: &Path, args: &[&str], description: &str) -> Result<Strin
 }
 
 fn git_text_allow_empty(
+    trusted: &HostConfig,
     repository: &Path,
     args: &[&str],
     description: &str,
 ) -> Result<String, String> {
-    let output = git_bytes(repository, args, description)?;
+    let output = git_bytes(trusted, repository, args, description)?;
     let text = String::from_utf8(output)
         .map_err(|error| format!("{description} returned non-UTF-8 output: {error}"))?;
     Ok(text.trim().to_owned())
 }
 
-fn git_bytes(repository: &Path, args: &[&str], description: &str) -> Result<Vec<u8>, String> {
-    let output = git(repository)
+fn git_bytes(
+    trusted: &HostConfig,
+    repository: &Path,
+    args: &[&str],
+    description: &str,
+) -> Result<Vec<u8>, String> {
+    let output = git(trusted, repository)
         .args(args)
         .output()
         .map_err(|error| format!("could not run {description}: {error}"))?;

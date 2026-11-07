@@ -159,7 +159,12 @@ expect sbxr to discover them.
 
 The credential proxy does not change workspace permissions. In default mode,
 sandbox code can modify the mounted host project and its `.git` directory. Use
-`sbxr review` for unfamiliar code and keep durable backups.
+`sbxr review` for unfamiliar code and keep durable backups. A writable `.git`
+also means the guest can prepare repository-local settings or hooks that plain
+host Git may later execute. `sbxr status` and `sbxr verify` audit that surface;
+`sbxr commit-pgp-sign` stops matching shared sandboxes and uses a fail-closed,
+hook-disabled, host-pinned commit-object path. These protections do not wrap a
+direct `git` command typed on the host.
 
 ## SSH forwarding is a separate trust decision
 

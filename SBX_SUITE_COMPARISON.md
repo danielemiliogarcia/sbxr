@@ -1,8 +1,17 @@
 # sbxr and sbx-suite comparison
 
+## Threat model in one line
+
+sbxr assumes an interactive developer: the agent gets full use of the project
+files, and the human gates what becomes trusted (signatures, protected
+branches). sbx-suite assumes an agent that may run unattended: keep it away from
+host files and host identity altogether.
+
+Most rows below follow from that difference.
+
 ## Feature and architecture comparison
 
-| Area | sbxr 0.3.5 | sbx-suite | Practical difference |
+| Area | sbxr 0.3.7 | sbx-suite | Practical difference |
 |---|---|---|---|
 | Primary goal | Fast, personalized, project-scoped Rust development | Mountless, controlled AI-agent environment; also specialized for Acrux | sbxr prioritizes daily developer comfort; sbx-suite prioritizes separation |
 | Host launcher | Native Rust executable | Python 3.10+ scripts using only the standard library | sbxr needs no host Rust when installed from a release; sbx-suite needs Python |
@@ -46,7 +55,10 @@ There is no universal security winner. The defaults defend different risks.
 | Security dimension | Stronger default | Why |
 |---|---|---|
 | Prevent sandbox code from modifying host source | sbx-suite | No host workspace mount |
-| Prevent access to host SSH/signing authority | sbx-suite | SSH-agent forwarding is disabled |
+| Prevent host code execution through shared `.git` config/hooks | sbx-suite | Nothing is mounted; sbxr must defend host Git explicitly (see below) |
+| Prevent pushing to GitHub as the developer | sbx-suite | SSH-agent forwarding is disabled; sbxr forwards it by default |
+| Prevent creating commits signed as the developer (OpenPGP YubiKey) | sbxr | Signing happens only on the host via `sbxr commit-pgp-sign`, with a physical key touch; the guest never holds signing authority |
+| Prevent creating commits signed as the developer (SSH signing key) | sbx-suite | sbxr's forwarded SSH agent can sign in the guest |
 | Protect reusable OAuth/token values | Approximately equal | Both use host proxying and non-secret sentinels |
 | Inspect completely unfamiliar code | sbxr `review` | Mountless and also removes OAuth, SSH, host configuration and shared skills |
 | Isolate projects from each other | sbxr | One sandbox per project by design |
@@ -55,6 +67,55 @@ There is no universal security winner. The defaults defend different risks.
 | Restrict policy changes to one sandbox | sbxr | Exact launcher-owned rule IDs and no global reset |
 | npm lifecycle-script resistance | sbx-suite | Globally disables automatic npm scripts by default |
 | Release artifact provenance | sbxr | Native artifacts and installers have checksums and GitHub attestations |
+
+## Signing vs. push authority
+
+"Host SSH authority" covers two separate powers, and the difference matters:
+
+| Authority | sbxr (OpenPGP YubiKey) | sbx-suite |
+|---|---|---|
+| Create commits carrying the developer's signature | Impossible from the guest; requires host `sbxr commit-pgp-sign` and a physical key touch | No integrated signing workflow |
+| Push to GitHub as the developer | Possible through the forwarded SSH agent | Not possible (agent forwarding disabled) |
+
+With OpenPGP signing on a YubiKey, the agent can propose work but cannot produce
+anything carrying the developer's signature. That makes the physical touch the
+trust gate, provided that unsigned pushes cannot land anywhere that matters:
+
+- enable **GitHub branch protection or rulesets requiring signed commits** on
+  important branches, and disable force-pushes and branch deletion there;
+- optionally enable GitHub vigilant mode, so unsigned commits attributed to the
+  developer are visibly flagged.
+
+Without those rules, the forwarded SSH agent remains a push-level risk: the agent
+can push unsigned commits, or force-push and delete unprotected branches. If the
+GitHub SSH authentication key also lives on a hardware key with touch required,
+pushes are gated by a physical touch as well.
+
+## Shared `.git` directory
+
+In shared mode the project, including `.git/`, is writable from the guest. An
+agent can therefore write repository-local Git config and hooks that host Git
+later trusts. Examples are `gpg.program`, `core.fsmonitor`, `core.pager`,
+filter drivers, `include.path` and executable hooks. Each of these can run a
+command on the host when host Git runs, which would bypass the microVM boundary
+without impersonating the developer.
+
+sbxr's mitigation:
+
+- `sbxr commit-pgp-sign` stops running sbxr sandboxes that share the repository,
+  reconstructs commits with `git commit-tree -S`, disables hooks, and pins
+  `gpg.program`, `gpg.openpgp.program`, `core.fsmonitor`, `core.pager` and
+  `user.signingKey` to host-owned values, and refuses to run when local config
+  contains non-allowlisted keys, includes, a foreign `core.worktree`, or a
+  symlinked or unregistered out-of-tree Git directory. It verifies replacement
+  commits before atomically moving the branch and never performs a checkout or
+  rebase.
+- `sbxr status` and `sbxr verify` warn about dangerous repository-local Git
+  config and about executable hooks.
+
+Plain host `git` used directly inside a shared project is **not** protected by
+sbxr. Run `sbxr verify` first, or work through the host-side sbxr commands.
+sbx-suite has no equivalent exposure because no host path is mounted.
 
 ## Supply-chain clarification
 
@@ -71,7 +132,8 @@ sbxr is the better fit when the developer wants:
 
 - source visible and durable on the host;
 - private Git over SSH;
-- OpenPGP/YubiKey signing;
+- OpenPGP/YubiKey signing, where the physical key touch on the host is the
+  trust gate (combined with GitHub rules requiring signed commits);
 - familiar shell aliases, utilities and VS Code configuration;
 - the fast `sbxr new -y` workflow;
 - automatic nested Rust toolchains;
@@ -80,13 +142,16 @@ sbxr is the better fit when the developer wants:
 
 sbx-suite is the better fit when the primary requirement is that agents must
 not see or modify any host project path or use host SSH authority, or when the
-specialized Acrux workload is required.
+specialized Acrux workload is required. It also suits agents that run
+unattended for long periods, where no human is present to gate signing or
+pushing.
 
 ## References
 
 - [sbxr README](README.md)
 - [sbxr credential architecture](CREDENTIAL_ARCHITECTURE.md)
 - [sbxr security model](SECURITY.md)
-- [sbx-suite README](/home/emi/tmp/sbx-suite/README.md)
-- [sbx-suite credential isolation](/home/emi/tmp/sbx-suite/docs/credential-isolation.md)
-- [sbx-suite usage and isolation](/home/emi/tmp/sbx-suite/docs/usage.md)
+- [sbx-suite README](https://github.com/diegomasini/sbx-suite/blob/main/README.md)
+- [sbx-suite credential isolation](https://github.com/diegomasini/sbx-suite/blob/main/docs/credential-isolation.md)
+- [sbx-suite usage and isolation](https://github.com/diegomasini/sbx-suite/blob/main/docs/usage.md)
+- [GitHub: require signed commits](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches#require-signed-commits)

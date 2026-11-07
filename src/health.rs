@@ -132,9 +132,10 @@ impl Ledger {
     }
 
     pub(crate) fn needs_repair(&self) -> bool {
-        self.entries
-            .iter()
-            .any(|(name, entry)| name != "ssh-agent" && entry.status == Status::NeedsAttention)
+        self.entries.iter().any(|(name, entry)| {
+            !matches!(name.as_str(), "ssh-agent" | "host-git-trust")
+                && entry.status == Status::NeedsAttention
+        })
     }
 
     pub(crate) fn needs_verification(&self) -> bool {
@@ -176,6 +177,7 @@ impl Ledger {
 
 fn expected(preset: Preset, profile: &Profile) -> Vec<(&'static str, bool)> {
     vec![
+        ("host-git-trust", true),
         ("runtime", true),
         ("guest-credentials", true),
         ("openai", preset.has_codex()),
@@ -394,6 +396,14 @@ mod tests {
                 "ssh-agent",
                 Status::NeedsAttention,
                 "forwarded agent unavailable or empty",
+            )
+            .unwrap();
+        assert!(!ledger.needs_repair());
+        ledger
+            .mark(
+                "host-git-trust",
+                Status::NeedsAttention,
+                "repository config can affect plain host Git",
             )
             .unwrap();
         assert!(!ledger.needs_repair());

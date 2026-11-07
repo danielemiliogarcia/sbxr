@@ -634,7 +634,7 @@ impl Action {
             | Self::Isolated(_)
             | Self::Wizard(_) => &["sbx", "code", "ssh"],
             Self::Review(_) => &["sbx", "code", "ssh", "git"],
-            Self::CommitPgpSign(_) => &["git"],
+            Self::CommitPgpSign(_) => &["git", "sbx"],
             Self::AuthRenew(request) if request.provider == AuthProvider::GitHub => &["sbx", "gh"],
             Self::AuthRenew(_) => &["sbx"],
             Self::Up(_)
@@ -647,11 +647,10 @@ impl Action {
             | Self::AuthImport(_)
             | Self::AuthStatus(_)
             | Self::Audit(_)
-            | Self::Verify(_)
             | Self::Repair(_)
-            | Self::Status(_)
             | Self::Stop(_)
             | Self::Remove { .. } => &["sbx"],
+            Self::Verify(_) | Self::Status(_) => &["sbx", "git"],
             Self::Inspect(_)
             | Self::Profile(_)
             | Self::Name(_)
@@ -727,12 +726,12 @@ Usage:
                            Renew openai, anthropic, or github through its proxy flow
   sbxr audit [PATH]        Run cargo-audit, cargo-deny, and cargo-vet
   sbxr commit-pgp-sign [PATH]
-                           Amend HEAD on the host with an OpenPGP signature
+                           Safely reconstruct and OpenPGP-sign HEAD on the host
   sbxr commit-pgp-sign --all-mine [PATH]
                            Sign your unsigned commits ahead of the upstream
   sbxr commit-pgp-sign --range BASE..HEAD [PATH]
                            Sign your unsigned commits in an explicit range
-  sbxr verify [PATH]       Audit runtime identity, credentials, tools, and SSH agent
+  sbxr verify [PATH]       Audit host Git trust, runtime, credentials, tools, and SSH
   sbxr verify --live [PATH]
                            Also make minimal Codex, Claude, and Pi model requests
   sbxr repair [PATH]       Reconcile missing/outdated integrations and verify them
@@ -740,7 +739,7 @@ Usage:
   sbxr review [PATH]       Open a no-OAuth clone-mode review sandbox
   sbxr inspect [PATH]      Show the protected environment declaration
   sbxr name [PATH]         Print the deterministic sandbox name
-  sbxr status [PATH]       Check whether the project sandbox exists
+  sbxr status [PATH]       Show sandbox and live host Git trust status
   sbxr stop [PATH]         Stop the project sandbox
   sbxr rm [--force] [PATH] Remove sandbox state; host files remain
   sbxr setup [--prebuild]  Configure the host; optionally warm the kit-composition cache
@@ -948,7 +947,7 @@ mod tests {
             path: None,
             selection: SignSelection::Head,
         });
-        assert_eq!(sign.required_host_commands(), ["git"]);
+        assert_eq!(sign.required_host_commands(), ["git", "sbx"]);
         assert!(!sign.needs_vscode_remote_ssh());
         assert!(!sign.needs_kvm());
 
@@ -956,7 +955,7 @@ mod tests {
             path: None,
             live: false,
         });
-        assert_eq!(verify.required_host_commands(), ["sbx"]);
+        assert_eq!(verify.required_host_commands(), ["sbx", "git"]);
         assert!(!verify.needs_vscode_remote_ssh());
         assert!(verify.needs_kvm());
 
@@ -997,7 +996,7 @@ mod tests {
         assert!(!version.needs_kvm());
 
         let status = Action::Status(None);
-        assert_eq!(status.required_host_commands(), ["sbx"]);
+        assert_eq!(status.required_host_commands(), ["sbx", "git"]);
         assert!(!status.needs_kvm());
     }
 

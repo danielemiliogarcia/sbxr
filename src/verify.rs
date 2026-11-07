@@ -1,7 +1,7 @@
 use crate::cli::Preset;
 use crate::environment::{Context, Project, RocksDbHost};
 use crate::profile::Profile;
-use crate::{auth, envfile, health, process, sandbox, sbx};
+use crate::{auth, envfile, git_trust, health, process, sandbox, sbx};
 use serde_json::Value;
 use std::process::Stdio;
 
@@ -376,6 +376,8 @@ pub(crate) fn run(
     }
     ledger.begin_verification()?;
 
+    verify_host_git_trust(&mut ledger, project)?;
+
     checked(
         &mut ledger,
         "runtime",
@@ -492,6 +494,37 @@ pub(crate) fn run(
     ledger.print();
     println!("verified: {name}");
     Ok(())
+}
+
+pub(crate) fn verify_host_git_trust(
+    ledger: &mut health::Ledger,
+    project: &Project,
+) -> Result<(), String> {
+    let result = git_trust::audit_with_trusted_host(&project.path);
+    match result {
+        Ok(None) => ledger.mark(
+            "host-git-trust",
+            health::Status::Verified,
+            "project has no Git metadata",
+        ),
+        Ok(Some(audit)) => {
+            audit.print();
+            let status = if audit.has_attention() {
+                health::Status::NeedsAttention
+            } else {
+                health::Status::Verified
+            };
+            ledger.mark("host-git-trust", status, audit.health_detail())
+        }
+        Err(error) => {
+            println!("WARN host Git trust inspection failed: {error}");
+            ledger.mark(
+                "host-git-trust",
+                health::Status::NeedsAttention,
+                "repository metadata could not be safely inspected",
+            )
+        }
+    }
 }
 
 fn checked(
