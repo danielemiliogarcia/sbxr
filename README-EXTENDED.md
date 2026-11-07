@@ -615,10 +615,11 @@ security, credential-architecture, dependency-review, and release-manifest
 documents, including the vendored dependencies' license texts. Rust is not
 required on the host. Docker's separately distributed `sbx` CLI remains a
 prerequisite.
-Prebuilt installation starts with release `0.3.4`. When no version is passed,
-the installer selects the newest release that contains the appropriate
-platform installer instead of selecting an older source-only release. Pass an
-exact version as the first argument, or through `SBXR_VERSION`, to pin it.
+Verified prebuilt installation is available for current releases. When no
+version is passed, the installer selects the newest release that contains the
+appropriate platform installer instead of selecting an older source-only
+release. Pass an exact version as the first argument, or through
+`SBXR_VERSION`, to pin it.
 
 On Linux x86-64/ARM64 and Apple-silicon macOS, download and verify the installer
 before executing it:

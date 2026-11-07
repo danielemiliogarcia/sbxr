@@ -2,7 +2,7 @@
 
 ## Feature and architecture comparison
 
-| Area | sbxr 0.3.4 | sbx-suite | Practical difference |
+| Area | sbxr 0.3.5 | sbx-suite | Practical difference |
 |---|---|---|---|
 | Primary goal | Fast, personalized, project-scoped Rust development | Mountless, controlled AI-agent environment; also specialized for Acrux | sbxr prioritizes daily developer comfort; sbx-suite prioritizes separation |
 | Host launcher | Native Rust executable | Python 3.10+ scripts using only the standard library | sbxr needs no host Rust when installed from a release; sbx-suite needs Python |
