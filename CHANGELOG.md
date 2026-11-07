@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.3.8] - 2026-11-07
+
+### Security
+
+- `sbxr commit-pgp-sign` in a linked worktree now also stops sbxr sandboxes of
+  the main checkout before auditing. A linked worktree's config, hooks, and
+  registration live in the main checkout's `.git`, outside the worktree root,
+  so in 0.3.7 a running sandbox of the main checkout could still change that
+  metadata between the audit and host signing. Shared environments are now
+  matched against the worktree root, its Git directory, and the common Git
+  directory.
+
+### Fixed
+
+- The post-signing restart hint now names each stopped sandbox's own
+  workspace. From a linked worktree it previously suggested `sbxr up` on the
+  worktree path, which would create a new sandbox instead of restarting the
+  stopped main-checkout sandbox.
+
+### Tests
+
+- End-to-end `git commit-tree -S` signing with a throwaway OpenPGP key for
+  both HEAD and `--all-mine` history: signatures verify, trees, parents,
+  author identity/date, and messages are preserved, the committer is the
+  trusted host identity, and the recovery ref names the old head.
+- A hostile repository (executable hooks, `core.hooksPath`, `core.fsmonitor`,
+  pager/editor, repository `gpg.program`/SSH signer, foreign signing key and
+  identity, and a required clean/smudge filter selected by `.gitattributes`)
+  is signed with the audit bypassed to prove the trusted Git command alone
+  keeps all of it inert.
+- Signing failure leaves the branch ref unchanged for HEAD and history mode.
+- Real Git-created linked worktrees: accepted, common and worktree-specific
+  config audited, forged or symlinked backlinks and unregistered out-of-tree
+  Git directories rejected; attribute-selected filters, diff textconv, and
+  merge drivers are flagged without running.
+- Quiescence: every non-stopped (running, starting, or status-less) shared
+  sandbox is selected for stopping, and post-stop verification fails closed.
+- CI now fails instead of skipping the OpenPGP integration tests when `gpg`
+  is missing.
+
 ## [0.3.7] - 2026-11-07
 
 ### Security

@@ -1,5 +1,6 @@
 use crate::cli::Preset;
 use crate::environment::{Context, Project, RocksDbHost, crate_name};
+use crate::git_trust::RepositoryLayout;
 use crate::profile::{NetworkProfile, Profile, WorkspaceMode};
 use crate::{
     browser, embedded, envfile, git, github_proxy, node_tools, orca, process, sbx, sha256, sync,
@@ -64,21 +65,23 @@ pub(crate) fn sandbox_name<'a>(project: &'a Project, profile: &Profile) -> &'a s
     }
 }
 
+/// Stops every sbxr sandbox that can write the repository's worktree, Git
+/// directory, or common Git directory, then re-reads the inventory and fails
+/// closed unless all of them are stopped. Must run before the host Git audit so
+/// a guest cannot change repository metadata between audit and signing.
 pub(crate) fn quiesce_repository_for_host_signing(
     context: &Context,
-    repository: &Path,
+    layout: &RepositoryLayout,
 ) -> Result<(), String> {
     process::require("sbx")?;
-    let environments = envfile::shared_environments_for_repository(context, repository)?;
+    let repository = layout.root.as_path();
+    let environments = envfile::shared_environments_for_repository(
+        context,
+        &[repository, &layout.git_dir, &layout.common_dir],
+    )?;
     let inventory = sbx::list_json(context.preserve_xdg_state)?;
     let mut stopped = Vec::new();
-    for environment in &environments {
-        let Some(state) = sbx::sandbox_state(&inventory.stdout, &environment.name)? else {
-            continue;
-        };
-        if state.eq_ignore_ascii_case("stopped") {
-            continue;
-        }
+    for (environment, _) in not_stopped(&environments, &inventory.stdout)? {
         println!(
             "==> stopping {} before trusted host Git signing",
             environment.name
@@ -91,27 +94,45 @@ pub(crate) fn quiesce_repository_for_host_signing(
             "stopped",
         )?;
         sbx::stop(context.preserve_xdg_state, &environment.name)?;
-        stopped.push(environment.name.clone());
+        stopped.push(environment);
     }
     let inventory = sbx::list_json(context.preserve_xdg_state)?;
-    for environment in &environments {
-        if let Some(state) = sbx::sandbox_state(&inventory.stdout, &environment.name)? {
-            if !state.eq_ignore_ascii_case("stopped") {
-                return Err(format!(
-                    "sandbox {} is still {state}; refusing host Git signing while a shared workspace can change repository metadata",
-                    environment.name
-                ));
-            }
-        }
+    if let Some((environment, state)) = not_stopped(&environments, &inventory.stdout)?
+        .into_iter()
+        .next()
+    {
+        return Err(format!(
+            "sandbox {} is still {state}; refusing host Git signing while a shared workspace can change repository metadata",
+            environment.name
+        ));
     }
-    if !stopped.is_empty() {
+    // Name each sandbox's own workspace: for a linked worktree, `sbxr up` on
+    // the signed path would create a new sandbox instead of restarting this one.
+    for environment in stopped {
         println!(
-            "stopped shared sandbox(es): {}; restart with `sbxr up {}` after signing",
-            stopped.join(", "),
-            shell_quote(repository)
+            "stopped shared sandbox {}; restart after signing with `sbxr up {}`",
+            environment.name,
+            shell_quote(&environment.workspace)
         );
     }
     Ok(())
+}
+
+/// Returns the environments whose sandbox exists and is in any state other than
+/// `stopped` (running, starting, unknown, ...). Absent sandboxes cannot write.
+fn not_stopped<'a>(
+    environments: &'a [envfile::SharedEnvironment],
+    inventory: &[u8],
+) -> Result<Vec<(&'a envfile::SharedEnvironment, String)>, String> {
+    let mut active = Vec::new();
+    for environment in environments {
+        if let Some(state) = sbx::sandbox_state(inventory, &environment.name)? {
+            if !state.eq_ignore_ascii_case("stopped") {
+                active.push((environment, state));
+            }
+        }
+    }
+    Ok(active)
 }
 
 fn shell_quote(path: &Path) -> String {
@@ -1244,9 +1265,64 @@ pub(crate) fn network_profile_applied(
 mod tests {
     use super::{
         HARDEN_CREDENTIAL_PERMISSIONS, NetworkProfile, network_profile_enforced,
-        network_profile_enforced_excluding, owned_rule_matches, parse_network_rules,
+        network_profile_enforced_excluding, not_stopped, owned_rule_matches, parse_network_rules,
         policy_has_resource, project_toolchain_manifests,
     };
+    use crate::envfile::SharedEnvironment;
+    use std::path::PathBuf;
+
+    fn shared(name: &str) -> SharedEnvironment {
+        SharedEnvironment {
+            name: name.to_owned(),
+            workspace: PathBuf::from("/workspace"),
+        }
+    }
+
+    #[test]
+    fn every_non_stopped_shared_sandbox_must_be_stopped_before_signing() {
+        let environments = [
+            shared("running"),
+            shared("stopped"),
+            shared("starting"),
+            shared("absent"),
+            shared("statusless"),
+        ];
+        let inventory = br#"[
+            {"name": "running", "status": "running"},
+            {"name": "stopped", "status": "Stopped"},
+            {"name": "starting", "status": "starting"},
+            {"name": "statusless"},
+            {"name": "unrelated", "status": "running"}
+        ]"#;
+        let active = not_stopped(&environments, inventory).unwrap();
+        assert_eq!(
+            active
+                .iter()
+                .map(|(environment, state)| (environment.name.as_str(), state.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("running", "running"),
+                ("starting", "starting"),
+                ("statusless", "unknown")
+            ]
+        );
+    }
+
+    #[test]
+    fn post_stop_verification_passes_only_when_all_shared_sandboxes_are_stopped() {
+        let environments = [shared("a"), shared("b")];
+        let all_stopped = br#"{"sandboxes": [
+            {"name": "a", "status": "stopped"},
+            {"name": "b", "status": "stopped"}
+        ]}"#;
+        assert!(not_stopped(&environments, all_stopped).unwrap().is_empty());
+        let restarted = br#"{"sandboxes": [
+            {"name": "a", "status": "stopped"},
+            {"name": "b", "status": "running"}
+        ]}"#;
+        assert_eq!(not_stopped(&environments, restarted).unwrap().len(), 1);
+        assert!(not_stopped(&environments, b"{}").is_err());
+    }
     use std::fs;
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};

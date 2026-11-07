@@ -32,9 +32,9 @@ pub(crate) fn run() -> Result<i32, String> {
         let context = Context::discover()?;
         let requested = request.path.as_deref().unwrap_or_else(|| Path::new("."));
         let project = Project::resolve(requested, cli.preset, None)?;
-        let repository = git_trust::repository_root(&project.path)?;
-        sandbox::quiesce_repository_for_host_signing(&context, &repository)?;
-        sign::commit_pgp_sign(&repository, &request.selection, cli.force)?;
+        let layout = git_trust::repository_layout(&project.path)?;
+        sandbox::quiesce_repository_for_host_signing(&context, &layout)?;
+        sign::commit_pgp_sign(&layout.root, &request.selection, cli.force)?;
         return Ok(0);
     }
     if !matches!(cli.action, Action::Doctor(_)) {

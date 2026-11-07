@@ -839,3 +839,428 @@ mod tests {
         assert_eq!(shell_quote(Path::new("/tmp/a b's")), "'/tmp/a b'\\''s'");
     }
 }
+
+/// End-to-end signing through real `git commit-tree -S` with a throwaway
+/// OpenPGP key, including a hostile repository whose executable settings and
+/// hooks must stay inert even when the audit is bypassed.
+#[cfg(all(test, unix))]
+mod signing_integration {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const SIGNER_NAME: &str = "sbxr test signer";
+    const SIGNER_EMAIL: &str = "signer@example.invalid";
+    const AUTHOR_DATE: &str = "1700000000 +0100";
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn short_temp(label: &str) -> PathBuf {
+        // Kept under /tmp and short: gpg-agent socket paths have a length limit.
+        PathBuf::from(format!(
+            "/tmp/sbxr-{label}-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn write_executable(path: &Path, contents: &str) {
+        fs::write(path, contents).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn fixture_git(directory: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(directory)
+            .args([
+                "-c",
+                "commit.gpgSign=false",
+                "-c",
+                "init.defaultBranch=master",
+            ])
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+            ])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    fn commit_as(repository: &Path, name: &str, email: &str, file: &str, message: &str) {
+        fs::write(repository.join(file), format!("{message}\n")).unwrap();
+        fixture_git(repository, &["add", file]);
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(repository)
+            .args([
+                "-c",
+                "commit.gpgSign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(["commit", "-q", "-m", message])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", name)
+            .env("GIT_AUTHOR_EMAIL", email)
+            .env("GIT_AUTHOR_DATE", AUTHOR_DATE)
+            .env("GIT_COMMITTER_NAME", name)
+            .env("GIT_COMMITTER_EMAIL", email)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    fn header(repository: &Path, revision: &str, name: &str) -> String {
+        fixture_git(repository, &["cat-file", "commit", revision])
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{name} ")).map(str::to_owned))
+            .unwrap_or_default()
+    }
+
+    /// Throwaway OpenPGP signer in an isolated GnuPG home.
+    struct Signer {
+        home: PathBuf,
+        wrapper: PathBuf,
+        fingerprint: String,
+    }
+
+    impl Signer {
+        fn create() -> Option<Self> {
+            let Some(gpg) = process::command_path("gpg") else {
+                assert!(
+                    std::env::var_os("SBXR_REQUIRE_GPG_TESTS").is_none(),
+                    "gpg is required when SBXR_REQUIRE_GPG_TESTS is set"
+                );
+                eprintln!("skipping OpenPGP signing integration test: gpg is unavailable");
+                return None;
+            };
+            let home = short_temp("gpg");
+            fs::create_dir(&home).unwrap();
+            fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+            // Constructed first so Drop cleans up the home on any failure below.
+            let mut signer = Self {
+                wrapper: home.join("gpg-wrapper"),
+                home,
+                fingerprint: String::new(),
+            };
+            let status = Command::new(&gpg)
+                .arg("--homedir")
+                .arg(&signer.home)
+                .args(["--batch", "--pinentry-mode", "loopback", "--passphrase", ""])
+                .args(["--quick-gen-key"])
+                .arg(format!("{SIGNER_NAME} <{SIGNER_EMAIL}>"))
+                .args(["ed25519", "sign", "never"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success(), "throwaway OpenPGP key generation failed");
+            let listing = Command::new(&gpg)
+                .arg("--homedir")
+                .arg(&signer.home)
+                .args(["--batch", "--with-colons", "--list-secret-keys"])
+                .output()
+                .unwrap();
+            signer.fingerprint = String::from_utf8(listing.stdout)
+                .unwrap()
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("fpr:")
+                        .and_then(|rest| rest.split(':').nth(8))
+                        .map(str::to_owned)
+                })
+                .expect("generated key has a fingerprint");
+            write_executable(
+                &signer.wrapper,
+                &format!(
+                    "#!/bin/sh\nexec '{}' --homedir '{}' --batch \"$@\"\n",
+                    gpg.display(),
+                    signer.home.display()
+                ),
+            );
+            Some(signer)
+        }
+
+        fn trusted(&self) -> HostConfig {
+            HostConfig::for_tests(
+                self.wrapper.clone(),
+                SIGNER_NAME,
+                SIGNER_EMAIL,
+                &self.fingerprint,
+            )
+        }
+
+        fn verifies(&self, repository: &Path, revision: &str) -> bool {
+            Command::new("git")
+                .arg("-C")
+                .arg(repository)
+                .arg("-c")
+                .arg(format!("gpg.program={}", self.wrapper.display()))
+                .args(["verify-commit", revision])
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        }
+    }
+
+    impl Drop for Signer {
+        fn drop(&mut self) {
+            let _ = Command::new("gpgconf")
+                .arg("--homedir")
+                .arg(&self.home)
+                .args(["--kill", "all"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            let _ = fs::remove_dir_all(&self.home);
+        }
+    }
+
+    /// A branch with an upstream commit by someone else followed by two
+    /// unsigned commits by the signer.
+    struct Fixture {
+        root: PathBuf,
+        repository: PathBuf,
+        base: String,
+    }
+
+    impl Fixture {
+        fn create() -> Self {
+            let root = short_temp("sign");
+            let repository = root.join("repository");
+            fs::create_dir_all(&repository).unwrap();
+            fixture_git(&repository, &["init", "-q"]);
+            commit_as(
+                &repository,
+                "Upstream",
+                "upstream@example.invalid",
+                "base.txt",
+                "upstream: base",
+            );
+            fixture_git(&repository, &["branch", "upstream"]);
+            fixture_git(&repository, &["branch", "--set-upstream-to=upstream"]);
+            let base = fixture_git(&repository, &["rev-parse", "HEAD"]);
+            commit_as(
+                &repository,
+                SIGNER_NAME,
+                SIGNER_EMAIL,
+                "one.txt",
+                "feat: one",
+            );
+            commit_as(
+                &repository,
+                SIGNER_NAME,
+                SIGNER_EMAIL,
+                "two.txt",
+                "feat: two",
+            );
+            Self {
+                root,
+                repository,
+                base,
+            }
+        }
+
+        fn head(&self) -> String {
+            fixture_git(&self.repository, &["rev-parse", "HEAD"])
+        }
+
+        fn tree(&self, revision: &str) -> String {
+            fixture_git(
+                &self.repository,
+                &["rev-parse", &format!("{revision}^{{tree}}")],
+            )
+        }
+
+        /// Plants every repository-controlled execution vector the signer
+        /// must neutralize. Each one appends to `marker` if it ever runs.
+        fn make_hostile(&self, marker: &Path) -> PathBuf {
+            let payload = self.root.join("payload.sh");
+            write_executable(
+                &payload,
+                &format!(
+                    "#!/bin/sh\necho \"$0 $*\" >> '{}'\nexit 1\n",
+                    marker.display()
+                ),
+            );
+            let payload_text = payload.to_str().unwrap();
+            let alternate_hooks = self.root.join("alternate-hooks");
+            fs::create_dir_all(&alternate_hooks).unwrap();
+            for hook in [
+                "pre-commit",
+                "commit-msg",
+                "post-commit",
+                "post-rewrite",
+                "post-checkout",
+                "reference-transaction",
+                "pre-auto-gc",
+            ] {
+                for directory in [self.repository.join(".git/hooks"), alternate_hooks.clone()] {
+                    write_executable(
+                        &directory.join(hook),
+                        &format!("#!/bin/sh\n'{payload_text}' {hook}\n"),
+                    );
+                }
+            }
+            for (key, value) in [
+                ("core.hooksPath", alternate_hooks.to_str().unwrap()),
+                ("core.fsmonitor", payload_text),
+                ("core.pager", payload_text),
+                ("core.editor", payload_text),
+                ("gpg.program", payload_text),
+                ("gpg.openpgp.program", payload_text),
+                ("gpg.format", "ssh"),
+                ("gpg.ssh.program", payload_text),
+                (
+                    "user.signingKey",
+                    "0000000000000000000000000000000000000000",
+                ),
+                ("user.name", "Attacker"),
+                ("user.email", "attacker@example.invalid"),
+                ("filter.evil.clean", payload_text),
+                ("filter.evil.smudge", payload_text),
+                ("filter.evil.required", "true"),
+                ("gc.auto", "1"),
+            ] {
+                fixture_git(&self.repository, &["config", "--local", key, value]);
+            }
+            fs::write(self.repository.join(".gitattributes"), "* filter=evil\n").unwrap();
+            payload
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn all_mine_reconstructs_signed_history_without_running_repository_code() {
+        let Some(signer) = Signer::create() else {
+            return;
+        };
+        let fixture = Fixture::create();
+        let repository = &fixture.repository;
+        let marker = fixture.root.join("HOST_COMMAND_EXECUTED");
+        fixture.make_hostile(&marker);
+        let old_head = fixture.head();
+        let old_tree = fixture.tree("HEAD");
+        let old_authors = [
+            header(repository, "HEAD~1", "author"),
+            header(repository, "HEAD", "author"),
+        ];
+        let old_messages = [
+            fixture_git(repository, &["log", "-1", "--format=%B", "HEAD~1"]),
+            fixture_git(repository, &["log", "-1", "--format=%B", "HEAD"]),
+        ];
+
+        // Bypass the audit on purpose: the trusted command alone must keep
+        // hooks, fsmonitor, pagers, filters, and repository signers inert.
+        sign_history(&signer.trusted(), repository, &SignSelection::AllMine, true).unwrap();
+
+        assert!(
+            !marker.exists(),
+            "repository-controlled code ran: {}",
+            fs::read_to_string(&marker).unwrap_or_default()
+        );
+        let new_head = fixture.head();
+        assert_ne!(new_head, old_head);
+        assert_eq!(fixture.tree("HEAD"), old_tree);
+        assert_eq!(
+            fixture_git(repository, &["rev-parse", "HEAD~2"]),
+            fixture.base
+        );
+        for (index, revision) in ["HEAD~1", "HEAD"].into_iter().enumerate() {
+            assert!(
+                signer.verifies(repository, revision),
+                "{revision} unverified"
+            );
+            assert_eq!(header(repository, revision, "author"), old_authors[index]);
+            assert!(header(repository, revision, "author").contains(AUTHOR_DATE));
+            let committer = header(repository, revision, "committer");
+            assert!(committer.starts_with(&format!("{SIGNER_NAME} <{SIGNER_EMAIL}>")));
+            assert_eq!(
+                fixture_git(repository, &["log", "-1", "--format=%B", revision]),
+                old_messages[index]
+            );
+            assert_eq!(
+                fixture.tree(revision),
+                fixture.tree(&format!("{old_head}{}", if index == 0 { "~1" } else { "" }))
+            );
+        }
+        assert!(!signer.verifies(repository, "HEAD~2"));
+        let recovery = fixture_git(
+            repository,
+            &[
+                "for-each-ref",
+                "--format=%(objectname)",
+                "refs/sbxr/commit-pgp-sign",
+            ],
+        );
+        assert_eq!(recovery, old_head);
+    }
+
+    #[test]
+    fn head_signing_keeps_parents_tree_and_author() {
+        let Some(signer) = Signer::create() else {
+            return;
+        };
+        let fixture = Fixture::create();
+        let repository = &fixture.repository;
+        let old_head = fixture.head();
+        let old_parent = fixture_git(repository, &["rev-parse", "HEAD~1"]);
+        let old_author = header(repository, "HEAD", "author");
+
+        sign_head(&signer.trusted(), repository).unwrap();
+
+        assert_ne!(fixture.head(), old_head);
+        assert!(signer.verifies(repository, "HEAD"));
+        assert!(!signer.verifies(repository, "HEAD~1"));
+        assert_eq!(
+            fixture_git(repository, &["rev-parse", "HEAD~1"]),
+            old_parent
+        );
+        assert_eq!(fixture.tree("HEAD"), fixture.tree(&old_head));
+        assert_eq!(header(repository, "HEAD", "author"), old_author);
+    }
+
+    #[test]
+    fn signing_failure_leaves_the_branch_unchanged() {
+        let fixture = Fixture::create();
+        let repository = &fixture.repository;
+        let failing = fixture.root.join("failing-gpg");
+        write_executable(&failing, "#!/bin/sh\nexit 1\n");
+        let trusted = HostConfig::for_tests(failing, SIGNER_NAME, SIGNER_EMAIL, "ABCDEF");
+        let old_head = fixture.head();
+
+        assert!(sign_head(&trusted, repository).is_err());
+        assert_eq!(fixture.head(), old_head);
+
+        let error = sign_history(&trusted, repository, &SignSelection::AllMine, true).unwrap_err();
+        assert!(error.contains("Recovery ref"), "{error}");
+        assert_eq!(fixture.head(), old_head);
+        assert_eq!(
+            fixture_git(repository, &["symbolic-ref", "HEAD"]),
+            "refs/heads/master"
+        );
+    }
+}

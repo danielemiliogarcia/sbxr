@@ -289,7 +289,9 @@ sbxr commit-pgp-sign .
 
 Before signing, the command stops every running sbxr-managed sandbox whose
 shared workspace can reach the repository and closes its matching VS Code
-window. It then rejects symlinked or unregistered out-of-tree Git metadata,
+window. In a linked worktree this includes sandboxes of the main checkout,
+because the worktree's config and hooks live in the main checkout's `.git`;
+the printed `sbxr up` hint names each stopped sandbox's own workspace. It then rejects symlinked or unregistered out-of-tree Git metadata,
 executable hooks, dangerous local settings, and any local setting outside its
 explicit allowlist. Git and GPG are resolved from the host, repository hooks
 are disabled, executable Git settings are pinned to inert or host-owned values,

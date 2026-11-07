@@ -72,7 +72,9 @@ unsupported-secret boundaries are described in
   VM. Automatic commit/tag signing follows the host project's effective Git
   defaults only when its signing format is SSH.
 - Shared-workspace host signing first stops every discoverable running
-  sbxr-managed sandbox that can reach the repository. It rejects symlinked or
+  sbxr-managed sandbox that can reach the repository's worktree, Git
+  directory, or common Git directory (for a linked worktree, that includes
+  sandboxes of the main checkout). It rejects symlinked or
   unregistered out-of-tree Git metadata, repository executable hooks, includes,
   executable helpers, and non-allowlisted local settings. The signing path uses
   absolute host Git/GPG programs, trusted global/system identity and signing

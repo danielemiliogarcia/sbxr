@@ -40,6 +40,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Test from vendored dependencies
+        env:
+          # Fail instead of skipping the throwaway-key OpenPGP signing tests.
+          SBXR_REQUIRE_GPG_TESTS: "1"
         run: cargo test --all-targets --offline --frozen
       - name: Lint
         run: cargo clippy --all-targets --all-features --offline --frozen -- -D warnings
