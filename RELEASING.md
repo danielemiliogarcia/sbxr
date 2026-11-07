@@ -4,7 +4,10 @@ Tagged releases publish native `sbxr` binaries so users do not need Rust on the
 host. Docker Sandboxes remains a separately installed prerequisite. The release
 workflow builds natively on GitHub-hosted runners, smoke-tests each binary and
 installer, creates checksums and build-provenance attestations, and publishes
-the GitHub Release only after every target succeeds.
+the GitHub Release only after every target succeeds. Before building, it
+verifies that the annotated version tag has an OpenPGP signature from the
+allowlisted YubiKey signing key and points to a commit reachable from `master`.
+Published releases are immutable.
 
 ## Compiler policy
 
@@ -69,7 +72,11 @@ reparse-point destination.
 3. Check the current stable Rust release. Update `RUST_RELEASE_VERSION` only
    after reviewing and testing that compiler.
 4. Review all vendored dependency and embedded-kit changes.
-5. Run the local gates:
+5. Confirm `.github/release-signing-key.asc` and the exact primary/signing
+   fingerprints in `scripts/verify-release-tag.sh` still identify the intended
+   release key. A deliberate key rotation must update all three together in a
+   reviewed pull request before the first tag signed by the new key.
+6. Run the local gates:
 
    ```bash
    rust_version=$(cat RUST_RELEASE_VERSION)
@@ -82,7 +89,7 @@ reparse-point destination.
    cargo +"$rust_version" build --release --target x86_64-unknown-linux-gnu --offline --frozen
    ```
 
-6. Exercise the local Linux archive and installer without network access:
+7. Exercise the local Linux archive and installer without network access:
 
    ```bash
    archive=$(./scripts/package-release.sh x86_64-unknown-linux-gnu)
@@ -99,7 +106,7 @@ reparse-point destination.
    and skips GitHub provenance because unpublished local files cannot have a
    release attestation. Normal user installation never sets it.
 
-7. Push the branch and let normal CI pass. Manually dispatch the `Release`
+8. Push the branch and let normal CI pass. Manually dispatch the `Release`
    workflow once if the complete four-platform artifact matrix should be tested
    before tagging. Each native job tests both the explicit-version installer
    path and automatic release discovery against its locally packaged archive.
@@ -109,19 +116,24 @@ reparse-point destination.
 ## Publish
 
 Review and merge the release commit, then create an annotated tag matching
-`VERSION`:
+`VERSION` with the configured OpenPGP/YubiKey key:
 
 ```bash
 version=$(cat VERSION)
-git tag -a "$version" -m "sbxr $version"
+git tag -s "$version" -m "sbxr $version"
+git tag -v "$version"
 git push origin "$version"
 ```
 
-The tag triggers `.github/workflows/release.yml`. It fails closed when the tag,
-Cargo package, `VERSION`, or changelog heading disagree. The publishing job has
-the only `contents: write`, `id-token: write`, and `attestations: write`
-permissions; checkout credentials are never persisted. External actions are
-pinned to immutable commit hashes.
+The tag triggers `.github/workflows/release.yml`. It fails closed unless the
+tag is annotated, its OpenPGP signature matches both allowlisted fingerprints,
+it resolves to the workflow commit, that commit is reachable from `master`, and
+the tag, Cargo package, `VERSION`, and changelog heading agree. The publishing
+job has the only `contents: write`, `id-token: write`, and
+`attestations: write` permissions; checkout credentials are never persisted.
+External actions are pinned to immutable commit hashes. GitHub locks the tag
+and all release assets when publication completes; release notes remain
+editable.
 
 After publication, a second four-platform matrix downloads the public POSIX or
 PowerShell installer, verifies its exact tag/workflow attestation, runs it

@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.6] - 2026-11-07
+
+### Security
+
+- Release CI now accepts only annotated version tags with a valid OpenPGP
+  signature from the allowlisted YubiKey signing subkey, verifies the exact
+  primary and signing fingerprints from a committed public key, binds the tag
+  to the workflow commit, and requires that commit to be reachable from
+  `master` before building or attesting artifacts. Normal CI verifies the same
+  policy against the latest published tag so key or script regressions fail in
+  pull requests.
+- Future GitHub Releases are immutable: after publication, their tag and
+  assets cannot be moved, replaced, or deleted. Repository branch and tag
+  rulesets protect reviewed `master` changes and semantic-version release
+  references while retaining the existing solo-maintainer pull-request flow.
+
 ## [0.3.5] - 2026-11-07
 
 ### Changed
