@@ -46,8 +46,12 @@ unsupported-secret boundaries are described in
 - Official binary releases are compiled natively with the exact stable Rust
   version in `RUST_RELEASE_VERSION` and `cargo --offline --frozen`. External
   GitHub Actions are pinned to immutable commits; all platform builds and local
-  installer smoke tests must succeed before publication. Every archive,
-  checksum file, and installer receives GitHub build-provenance attestation.
+  installer smoke tests must succeed before publication. Release CI accepts
+  only annotated tags signed by the allowlisted OpenPGP/YubiKey signing key,
+  binds the tag to its workflow commit, and requires that commit to be
+  reachable from `master`. Every archive, checksum file, and installer receives
+  GitHub build-provenance attestation. New releases are immutable after
+  publication, preventing their tag or assets from being replaced or deleted.
   The installers verify the selected archive's repository/workflow/tag
   provenance, SHA-256, embedded version, and non-symlink destination before
   installation. Source installation remains available for users who prefer to

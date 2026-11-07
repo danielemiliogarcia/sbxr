@@ -691,6 +691,14 @@ Checksums detect corruption. The GitHub attestation additionally binds an
 artifact to this repository, its tag, and the pinned release workflow. Neither
 is a substitute for trusting that reviewed source and workflow.
 
+Before any official build starts, release CI verifies that the version tag is
+an annotated OpenPGP tag signed by the allowlisted YubiKey signing key, points
+to the workflow commit, and is reachable from `master`. GitHub then makes the
+published release immutable, so its tag and assets cannot subsequently be
+moved, replaced, or deleted. The committed public key and exact accepted
+fingerprints are auditable in `.github/release-signing-key.asc` and
+`scripts/verify-release-tag.sh`.
+
 ### Build from source
 
 Convenient source installation or upgrade from the latest public `master`

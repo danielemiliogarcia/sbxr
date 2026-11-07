@@ -20,7 +20,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: Verify the YubiKey-signed release tag
+        if: ${{ github.ref_type == 'tag' }}
+        run: ./scripts/verify-release-tag.sh
       - name: Install the pinned stable Rust release compiler
         shell: bash
         run: |
