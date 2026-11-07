@@ -64,6 +64,60 @@ pub(crate) fn sandbox_name<'a>(project: &'a Project, profile: &Profile) -> &'a s
     }
 }
 
+pub(crate) fn quiesce_repository_for_host_signing(
+    context: &Context,
+    repository: &Path,
+) -> Result<(), String> {
+    process::require("sbx")?;
+    let environments = envfile::shared_environments_for_repository(context, repository)?;
+    let inventory = sbx::list_json(context.preserve_xdg_state)?;
+    let mut stopped = Vec::new();
+    for environment in &environments {
+        let Some(state) = sbx::sandbox_state(&inventory.stdout, &environment.name)? else {
+            continue;
+        };
+        if state.eq_ignore_ascii_case("stopped") {
+            continue;
+        }
+        println!(
+            "==> stopping {} before trusted host Git signing",
+            environment.name
+        );
+        crate::vscode::close_for_lifecycle(
+            context,
+            &environment.name,
+            &environment.workspace,
+            "commit-pgp-sign",
+            "stopped",
+        )?;
+        sbx::stop(context.preserve_xdg_state, &environment.name)?;
+        stopped.push(environment.name.clone());
+    }
+    let inventory = sbx::list_json(context.preserve_xdg_state)?;
+    for environment in &environments {
+        if let Some(state) = sbx::sandbox_state(&inventory.stdout, &environment.name)? {
+            if !state.eq_ignore_ascii_case("stopped") {
+                return Err(format!(
+                    "sandbox {} is still {state}; refusing host Git signing while a shared workspace can change repository metadata",
+                    environment.name
+                ));
+            }
+        }
+    }
+    if !stopped.is_empty() {
+        println!(
+            "stopped shared sandbox(es): {}; restart with `sbxr up {}` after signing",
+            stopped.join(", "),
+            shell_quote(repository)
+        );
+    }
+    Ok(())
+}
+
+fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+
 pub(crate) fn ensure_dev(
     context: &Context,
     project: &Project,

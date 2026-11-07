@@ -209,6 +209,149 @@ pub(crate) fn definition_path(context: &Context, sandbox_name: &str) -> PathBuf 
         .join("definitions/.sbxenv.yaml")
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SharedEnvironment {
+    pub(crate) name: String,
+    pub(crate) workspace: PathBuf,
+}
+
+pub(crate) fn shared_environments_for_repository(
+    context: &Context,
+    repository: &Path,
+) -> Result<Vec<SharedEnvironment>, String> {
+    let projects = context.state_root.join("projects");
+    if !projects.exists() {
+        return Ok(Vec::new());
+    }
+    inspect_secure_directory(&context.state_root)?;
+    inspect_secure_directory(&projects)?;
+    let repository = repository.canonicalize().map_err(|error| {
+        format!(
+            "could not canonicalize Git repository {}: {error}",
+            repository.display()
+        )
+    })?;
+    let mut environments = Vec::new();
+    for entry in fs::read_dir(&projects)
+        .map_err(|error| format!("could not read {}: {error}", projects.display()))?
+    {
+        let entry = entry.map_err(|error| format!("could not read sbxr project state: {error}"))?;
+        let state_directory = entry.path();
+        inspect_secure_directory(&state_directory)?;
+        let definitions = state_directory.join("definitions");
+        if !definitions.exists() {
+            continue;
+        }
+        inspect_secure_directory(&definitions)?;
+        let definition = definitions.join(".sbxenv.yaml");
+        reject_symlink_file(&definition)?;
+        let contents = match fs::read_to_string(&definition) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!("could not read {}: {error}", definition.display()));
+            }
+        };
+        let Some(environment) = parse_shared_environment(&contents, &definition)? else {
+            continue;
+        };
+        if entry.file_name().to_string_lossy() != environment.name {
+            return Err(format!(
+                "trusted environment {} names a different sandbox ({})",
+                definition.display(),
+                environment.name
+            ));
+        }
+        let workspace = match environment.workspace.canonicalize() {
+            Ok(workspace) => workspace,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(format!(
+                    "could not canonicalize workspace from {}: {error}",
+                    definition.display()
+                ));
+            }
+        };
+        if workspace == repository
+            || workspace.starts_with(&repository)
+            || repository.starts_with(&workspace)
+        {
+            environments.push(SharedEnvironment {
+                name: environment.name,
+                workspace,
+            });
+        }
+    }
+    environments.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(environments)
+}
+
+fn parse_shared_environment(
+    contents: &str,
+    path: &Path,
+) -> Result<Option<SharedEnvironment>, String> {
+    let mut name = None;
+    let mut workspace = None;
+    let mut in_workspace = false;
+    let mut clone = None;
+    for line in contents.lines() {
+        if let Some(value) = line.strip_prefix("name: ") {
+            name = Some(parse_yaml_string(value, "name", path)?);
+            continue;
+        }
+        if line == "workspace:" {
+            in_workspace = true;
+            continue;
+        }
+        if in_workspace {
+            if let Some(value) = line.strip_prefix("  path: ") {
+                workspace = Some(PathBuf::from(parse_yaml_string(
+                    value,
+                    "workspace path",
+                    path,
+                )?));
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("  clone: ") {
+                clone = Some(match value {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        return Err(format!(
+                            "trusted environment {} has an invalid workspace clone value",
+                            path.display()
+                        ));
+                    }
+                });
+                in_workspace = false;
+            }
+        }
+    }
+    let name = name.ok_or_else(|| format!("trusted environment {} has no name", path.display()))?;
+    let workspace = workspace.ok_or_else(|| {
+        format!(
+            "trusted environment {} has no workspace path",
+            path.display()
+        )
+    })?;
+    let clone = clone.ok_or_else(|| {
+        format!(
+            "trusted environment {} has no workspace clone mode",
+            path.display()
+        )
+    })?;
+    Ok((!clone).then_some(SharedEnvironment { name, workspace }))
+}
+
+fn parse_yaml_string(value: &str, label: &str, path: &Path) -> Result<String, String> {
+    serde_json::from_str::<String>(value).map_err(|error| {
+        format!(
+            "trusted environment {} has an invalid {label}: {error}",
+            path.display()
+        )
+    })
+}
+
 pub(crate) fn read_network_policy_record(
     context: &Context,
     sandbox_name: &str,
@@ -1001,6 +1144,51 @@ mod tests {
             "\"hello: world\\nnext\""
         );
         assert_eq!(yaml_string("quote \\\"").unwrap(), "\"quote \\\\\\\"\"");
+    }
+
+    #[test]
+    fn discovers_only_shared_environments_that_can_reach_the_repository() {
+        let root = std::env::temp_dir().join(format!(
+            "sbxr-shared-environment-test-{}-{}",
+            std::process::id(),
+            TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let state = root.join("state");
+        let projects = state.join("projects");
+        let workspace = root.join("workspace");
+        let nested = workspace.join("nested");
+        let missing = root.join("removed-workspace");
+        fs::create_dir_all(&nested).unwrap();
+        secure_directory(&state).unwrap();
+        secure_directory(&projects).unwrap();
+        for (name, clone, path) in [
+            ("shared", false, nested.as_path()),
+            ("isolated", true, workspace.as_path()),
+            ("stale", false, missing.as_path()),
+        ] {
+            let definitions = projects.join(name).join("definitions");
+            secure_directory(&projects.join(name)).unwrap();
+            secure_directory(&definitions).unwrap();
+            atomic_write(
+                &definitions.join(".sbxenv.yaml"),
+                format!(
+                    "schemaVersion: \"1\"\nname: \"{name}\"\nagent: \"codex\"\nworkspace:\n  path: {}\n  clone: {clone}\nkits: []\n",
+                    serde_json::to_string(path.to_str().unwrap()).unwrap()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        }
+        let context = Context {
+            kit_root: root.join("kits"),
+            state_root: state,
+            preserve_xdg_state: false,
+        };
+        let environments = shared_environments_for_repository(&context, &workspace).unwrap();
+        assert_eq!(environments.len(), 1);
+        assert_eq!(environments[0].name, "shared");
+        assert_eq!(environments[0].workspace, nested.canonicalize().unwrap());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

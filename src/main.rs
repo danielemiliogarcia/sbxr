@@ -7,6 +7,7 @@ mod embedded;
 mod envfile;
 mod environment;
 mod git;
+mod git_trust;
 mod github_proxy;
 mod health;
 mod host;

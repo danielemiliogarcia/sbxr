@@ -2,8 +2,8 @@ use crate::cli::{self, Action, Cli};
 use crate::environment::{Context, Project, RocksDbHost};
 use crate::profile::{self, WorkspaceMode};
 use crate::{
-    auth, diagnostics, envfile, github_proxy, health, host, orca, process, sandbox, sbx, sign,
-    verify, vscode,
+    auth, diagnostics, envfile, git_trust, github_proxy, health, host, orca, process, sandbox, sbx,
+    sign, verify, vscode,
 };
 use std::env;
 use std::path::Path;
@@ -29,11 +29,12 @@ pub(crate) fn run() -> Result<i32, String> {
     }
     if let Action::CommitPgpSign(request) = &cli.action {
         host::preflight(&cli.action)?;
-        sign::commit_pgp_sign(
-            request.path.as_deref().unwrap_or_else(|| Path::new(".")),
-            &request.selection,
-            cli.force,
-        )?;
+        let context = Context::discover()?;
+        let requested = request.path.as_deref().unwrap_or_else(|| Path::new("."));
+        let project = Project::resolve(requested, cli.preset, None)?;
+        let repository = git_trust::repository_root(&project.path)?;
+        sandbox::quiesce_repository_for_host_signing(&context, &repository)?;
+        sign::commit_pgp_sign(&repository, &request.selection, cli.force)?;
         return Ok(0);
     }
     if !matches!(cli.action, Action::Doctor(_)) {
@@ -283,7 +284,8 @@ fn dispatch(
         Action::Name(_) => println!("{name}"),
         Action::Status(_) => {
             let exists = show_selected_status(context, project, profile)?;
-            let ledger = health::Ledger::load(context, name, preset, profile)?;
+            let mut ledger = health::Ledger::load(context, name, preset, profile)?;
+            verify::verify_host_git_trust(&mut ledger, project)?;
             ledger.print();
             if exists && ledger.needs_repair() {
                 println!("repair: sbxr repair {}", shell_quote_path(&project.path));

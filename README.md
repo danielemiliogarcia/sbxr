@@ -172,4 +172,9 @@ After a microVM stop, VS Code Remote-SSH may restore terminal tabs but lose thei
 
 Docker Sandboxes forwards SSH agents, but not OpenPGP/GPG, YubiKey GPG, or S/MIME signers. `sbxr` warns and disables automatic sandbox signing for those host configurations, so commits made in the sandbox are unsigned and must be signed or re-signed on the host.
 
+The default shared workspace includes `.git`. `sbxr status`, `sbxr verify`, and
+the hardened host-only signing command inspect repository-local executable
+settings and hooks, but plain host `git` is not wrapped. See the
+[shared Git trust model](README-EXTENDED.md#git-inside-or-outside-the-sandbox).
+
 Docker Sandboxes 0.39 introduced experimental Linux USB passthrough, which could make direct YubiKey GPG signing inside a microVM possible in the future. `sbxr` does not enable it: passing the whole USB device into an agent-controlled VM expands the trust boundary, may temporarily remove it from the host, and requires additional GnuPG, smart-card, and pinentry setup. Track the feature in Docker's [Sandbox release notes](https://docs.docker.com/ai/sandboxes/release-notes/); host-side signing remains the supported workflow.

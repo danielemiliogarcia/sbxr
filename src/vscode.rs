@@ -79,12 +79,24 @@ pub(crate) fn close_for_lifecycle(
     command: &str,
     outcome: &str,
 ) -> Result<(), String> {
-    if !process::command_exists("code") || !remote_window_open(context, sandbox_name)? {
+    if !process::command_exists("code") {
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    let use_window_manager = process::command_exists("wmctrl");
+    #[cfg(not(target_os = "linux"))]
+    let use_window_manager = false;
+
+    if use_window_manager {
+        if !remote_window_open_with_window_manager(sandbox_name)? {
+            return Ok(());
+        }
+    } else if !remote_window_open(context, sandbox_name)? {
         return Ok(());
     }
     println!("==> asking VS Code to save and close {sandbox_name}.sbx");
     let closed_with_window_manager =
-        close_remote_windows_with_window_manager(context, sandbox_name)?;
+        use_window_manager && close_remote_windows_with_window_manager(context, sandbox_name)?;
     if !closed_with_window_manager {
         let (all_windows, matching_windows) = vscode_window_counts(context, sandbox_name)?;
         if all_windows != matching_windows || matching_windows != 1 {
