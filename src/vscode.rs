@@ -1,4 +1,5 @@
 use crate::environment::Context;
+use crate::profile::ShellProgram;
 use crate::{process, sbx, sync};
 use serde_json::{Map, Value};
 use std::env;
@@ -16,6 +17,7 @@ const REMOTE_MACHINE_SETTINGS_DIRECTORY: &str = "/home/agent/.vscode-server/data
 const REMOTE_WINDOW_CLOSE_WAIT: Duration = Duration::from_secs(30);
 const VSCODE_STATUS_WAIT: Duration = Duration::from_secs(5);
 const EXTENSION_INSTALL_BATCH_SIZE: usize = 4;
+const REMOTE_TERMINAL_PROFILE: &str = "sbxr login shell";
 
 pub(crate) fn check_host() -> Result<(), String> {
     process::require("code")?;
@@ -38,12 +40,14 @@ pub(crate) fn open(
     context: &Context,
     sandbox_name: &str,
     project: &Path,
+    shell: ShellProgram,
     mirror_extensions: bool,
     bootstrap: bool,
 ) -> Result<bool, String> {
     if bootstrap {
         sbx::setup_ssh(context.preserve_xdg_state)?;
     }
+    configure_terminal(context, sandbox_name, shell)?;
     process::run_checked(
         process::code_command(context.preserve_xdg_state).args(remote_open_arguments(
             sandbox_name,
@@ -63,7 +67,6 @@ pub(crate) fn open(
         );
         return Ok(false);
     };
-    configure_terminal_persistence(context, sandbox_name)?;
     if mirror_extensions {
         sync_extensions(context, sandbox_name, &server_cli)?;
     } else {
@@ -251,7 +254,11 @@ fn remote_window_ids<'a>(listing: &'a str, sandbox_name: &str) -> Vec<&'a str> {
         .collect()
 }
 
-fn configure_terminal_persistence(context: &Context, sandbox_name: &str) -> Result<(), String> {
+fn configure_terminal(
+    context: &Context,
+    sandbox_name: &str,
+    shell: ShellProgram,
+) -> Result<(), String> {
     process::run_checked(
         sbx::exec_command(context.preserve_xdg_state).args([
             sandbox_name,
@@ -271,6 +278,26 @@ fn configure_terminal_persistence(context: &Context, sandbox_name: &str) -> Resu
             .map_err(|error| format!("could not parse remote VS Code machine settings: {error}"))?,
         None => Value::Object(Map::new()),
     };
+    let changed = reconcile_terminal_settings(&mut settings, shell)?;
+    if !changed {
+        return Ok(());
+    }
+    let bytes = serde_json::to_vec_pretty(&settings)
+        .map_err(|error| format!("could not serialize remote VS Code settings: {error}"))?;
+    sync::upload_file(
+        sandbox_name,
+        context.preserve_xdg_state,
+        REMOTE_MACHINE_SETTINGS,
+        &bytes,
+    )?;
+    println!(
+        "==> selected {} as the VS Code terminal login shell and enabled session revival",
+        shell.name()
+    );
+    Ok(())
+}
+
+fn reconcile_terminal_settings(settings: &mut Value, shell: ShellProgram) -> Result<bool, String> {
     let Some(object) = settings.as_object_mut() else {
         return Err("remote VS Code machine settings must be a JSON object".to_owned());
     };
@@ -291,6 +318,10 @@ fn configure_terminal_persistence(context: &Context, sandbox_name: &str) -> Resu
             "terminal.integrated.shellIntegration.enabled",
             Value::Bool(true),
         ),
+        (
+            "terminal.integrated.defaultProfile.linux",
+            Value::String(REMOTE_TERMINAL_PROFILE.to_owned()),
+        ),
     ];
     let mut changed = false;
     for (key, value) in wanted {
@@ -299,19 +330,22 @@ fn configure_terminal_persistence(context: &Context, sandbox_name: &str) -> Resu
             changed = true;
         }
     }
-    if !changed {
-        return Ok(());
+    let profiles = object
+        .entry("terminal.integrated.profiles.linux")
+        .or_insert_with(|| Value::Object(Map::new()));
+    let Some(profiles) = profiles.as_object_mut() else {
+        return Err("remote VS Code Linux terminal profiles must be a JSON object".to_owned());
+    };
+    let profile = serde_json::json!({
+        "path": shell.guest_path(),
+        "args": ["-l"],
+        "overrideName": true,
+    });
+    if profiles.get(REMOTE_TERMINAL_PROFILE) != Some(&profile) {
+        profiles.insert(REMOTE_TERMINAL_PROFILE.to_owned(), profile);
+        changed = true;
     }
-    let bytes = serde_json::to_vec_pretty(&settings)
-        .map_err(|error| format!("could not serialize remote VS Code settings: {error}"))?;
-    sync::upload_file(
-        sandbox_name,
-        context.preserve_xdg_state,
-        REMOTE_MACHINE_SETTINGS,
-        &bytes,
-    )?;
-    println!("==> enabled VS Code terminal session revival and persistent scrollback");
-    Ok(())
+    Ok(changed)
 }
 
 fn sync_extensions(context: &Context, sandbox_name: &str, server_cli: &str) -> Result<(), String> {
@@ -587,5 +621,39 @@ mod tests {
 
         assert_eq!(batches, [&extensions[..4], &extensions[4..]]);
         assert!(batches.iter().all(|batch| batch.len() <= 4));
+    }
+
+    #[test]
+    fn selects_the_project_login_shell_for_new_remote_terminals() {
+        let mut settings = serde_json::json!({
+            "editor.fontSize": 14,
+            "terminal.integrated.profiles.linux": {
+                "User profile": {"path": "/bin/sh"}
+            }
+        });
+        assert!(reconcile_terminal_settings(&mut settings, ShellProgram::Bash).unwrap());
+        assert_eq!(settings["editor.fontSize"], 14);
+        assert_eq!(
+            settings["terminal.integrated.defaultProfile.linux"],
+            REMOTE_TERMINAL_PROFILE
+        );
+        assert_eq!(
+            settings["terminal.integrated.profiles.linux"]["User profile"]["path"],
+            "/bin/sh"
+        );
+        assert_eq!(
+            settings["terminal.integrated.profiles.linux"][REMOTE_TERMINAL_PROFILE]["path"],
+            "/bin/bash"
+        );
+        assert_eq!(
+            settings["terminal.integrated.profiles.linux"][REMOTE_TERMINAL_PROFILE]["args"],
+            serde_json::json!(["-l"])
+        );
+        assert!(!reconcile_terminal_settings(&mut settings, ShellProgram::Bash).unwrap());
+        assert!(reconcile_terminal_settings(&mut settings, ShellProgram::Fish).unwrap());
+        assert_eq!(
+            settings["terminal.integrated.profiles.linux"][REMOTE_TERMINAL_PROFILE]["path"],
+            "/usr/bin/fish"
+        );
     }
 }

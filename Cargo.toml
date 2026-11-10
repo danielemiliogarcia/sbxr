@@ -1,6 +1,6 @@
 [package]
 name = "sbxr"
-version = "0.3.8"
+version = "0.3.9"
 edition = "2024"
 rust-version = "1.85"
 description = "Project-scoped Rust development sandboxes for Docker Sandboxes"

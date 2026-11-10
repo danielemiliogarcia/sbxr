@@ -55,6 +55,9 @@ sbxr new .
 `setup` explains how to install any missing system prerequisite and can be
 rerun safely. An existing Rust project directory works in place of the empty
 directory above; an empty directory is initialized with Cargo automatically.
+Lifecycle commands start Docker's on-demand sandbox daemon when needed and
+wait for it to become ready, so a sleeping daemon does not require a separate
+`sbx daemon start` step.
 
 ## What it includes
 
@@ -62,9 +65,10 @@ The default `rust-multi-agent` preset combines:
 
 - Docker's digest-pinned official Kits v3 Codex workload and Claude mixin,
   with host-managed ChatGPT and Claude subscription OAuth;
-- pinned Rust 1.99.1 tooling, Cargo security tools, and a colored Git-aware
-  Bash prompt, plus `nano`, Bash/Git completion, and a generated `en_US.UTF-8`
-  locale for clean VS Code terminals;
+- pinned Rust 1.99.1 tooling, Cargo security tools, and a host-style colored,
+  Git-aware Bash prompt, plus `nano`, Bash/Git completion, an explicit VS Code
+  login-shell profile, and a generated `en_US.UTF-8` locale for clean remote
+  terminals;
 - the native Claude Code binary shipped by Docker's official Claude mixin;
 - pinned Pi, connected to the Docker-managed Codex and Claude OAuth proxies;
 - the pinned Paseo CLI and a loopback-only Paseo daemon that host Paseo clients
