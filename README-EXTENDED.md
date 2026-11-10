@@ -105,9 +105,10 @@ The default `rust-multi-agent` preset combines:
 
 - Docker's digest-pinned official Kits v3 Codex workload and Claude mixin,
   with host-managed ChatGPT and Claude subscription OAuth;
-- pinned Rust 1.99.1 tooling, Cargo security tools, and a colored Git-aware
-  Bash prompt, plus `nano`, Bash/Git completion, and a generated `en_US.UTF-8`
-  locale for clean VS Code terminals;
+- pinned Rust 1.99.1 tooling, Cargo security tools, and a host-style colored,
+  Git-aware Bash prompt, plus `nano`, Bash/Git completion, an explicit VS Code
+  login-shell profile, and a generated `en_US.UTF-8` locale for clean remote
+  terminals;
 - the native Claude Code binary shipped by Docker's official Claude mixin;
 - pinned Pi, connected to the Docker-managed Codex and Claude OAuth proxies;
 - the pinned Paseo CLI and a loopback-only Paseo daemon that host Paseo clients
@@ -974,8 +975,14 @@ The default `familiar` shell profile preserves the existing behavior: it
 extracts alias definitions from `~/.bashrc`, mirrors `~/.bash_aliases` and
 `~/bin` into the sbxr-owned guest folder `~/.local/share/sbxr/host-shell`, and
 appends the mirrored `bin` to `PATH` so sandbox-managed toolchains keep
-priority. The rest of `.bashrc` is not adopted. Choose Bash, Zsh, or Fish and
-configure the overlay through the wizard or direct options:
+priority. Its generated classic Bash prompt follows the host-style bracketed
+status, colors, Git branch, and long-path wrapping; shared paths below the host
+home are displayed with `~`. The rest of `.bashrc` is not adopted because it
+can contain host-only commands, paths, or secrets. Use `--prompt-file` when an
+exact custom prompt is kept in a dedicated nonsecret file. VS Code is given an
+explicit remote login-shell profile for the selected Bash, Zsh, or Fish
+executable, so new terminals do not fall back to `/bin/sh`. Configure the
+overlay through the wizard or direct options:
 
 ```bash
 # Clean sbxr shell with no default host alias/bin mirror.

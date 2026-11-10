@@ -277,7 +277,17 @@ fn dispatch(
         Action::Review(_) => {
             vscode::check_host()?;
             sandbox::ensure_review(context, project, rocksdb, force)?;
-            vscode::open(context, &project.review_name, &project.path, false, true)?;
+            // Review sandboxes are intentionally minimal and do not receive the
+            // development profile's host-shell overlay, so Bash is their fixed
+            // and verified terminal shell.
+            vscode::open(
+                context,
+                &project.review_name,
+                &project.path,
+                profile::ShellProgram::Bash,
+                false,
+                true,
+            )?;
         }
         Action::Inspect(_) => {
             let kind = selected_kind(preset, profile);
@@ -351,7 +361,14 @@ fn open_dev(
     let mut state = sandbox::ensure_dev(
         context, project, preset, rocksdb, profile, force_sync, force_plan,
     )?;
-    if vscode::open(context, name, &project.path, true, !state.vscode)? {
+    if vscode::open(
+        context,
+        name,
+        &project.path,
+        profile.shell.program,
+        true,
+        !state.vscode,
+    )? {
         state.vscode = true;
         crate::sync::write_bootstrap_state(name, context.preserve_xdg_state, state)?;
         println!("==> sandbox host-integration bootstrap complete");

@@ -761,7 +761,7 @@ pub(crate) fn host_shell_profile_current(
     let home = process::home_dir()?;
     let home_text = home.to_string_lossy();
     let inputs = host_shell_inputs(shell, &home, &home_text, state_root)?;
-    let runtime = host_shell_runtime(shell, &inputs);
+    let runtime = host_shell_runtime(shell, &inputs, &home_text);
     let expected = host_shell_profile_digest(shell, &inputs, &runtime, &home)?;
     Ok(
         remote_file(sandbox_name, preserve_xdg_state, HOST_SHELL_PROFILE_MARKER)?
@@ -782,7 +782,7 @@ pub(crate) fn host_shell(
     for warning in &inputs.warnings {
         eprintln!("warning: {warning}");
     }
-    let runtime = host_shell_runtime(shell, &inputs);
+    let runtime = host_shell_runtime(shell, &inputs, &home_text);
     let digest = host_shell_profile_digest(shell, &inputs, &runtime, &home)?;
     replace_host_shell_mirror(
         sandbox_name,
@@ -832,12 +832,13 @@ fn extracted_alias_path(shell: &ShellConfig, inputs: &HostShellInputs) -> Option
         })
 }
 
-fn host_shell_runtime(shell: &ShellConfig, inputs: &HostShellInputs) -> String {
+fn host_shell_runtime(shell: &ShellConfig, inputs: &HostShellInputs, host_home: &str) -> String {
     render_host_shell_runtime(
         shell,
         &inputs.alias_files,
         &inputs.bin_dirs,
         extracted_alias_path(shell, inputs),
+        host_home,
     )
 }
 
@@ -1285,6 +1286,7 @@ fn render_host_shell_runtime(
     aliases: &[String],
     bins: &[String],
     extracted: Option<&str>,
+    host_home: &str,
 ) -> String {
     let mut output = String::from("# Managed by sbxr from the protected shell profile.\n");
     match shell.program {
@@ -1315,6 +1317,8 @@ fn render_host_shell_runtime(
                     ShellProgram::Zsh => output.push_str("PROMPT='%n@%m:%~%# '\n"),
                     ShellProgram::Fish => unreachable!(),
                 }
+            } else if shell.prompt == PromptStyle::Classic && shell.program == ShellProgram::Bash {
+                output.push_str(&classic_bash_prompt(host_home));
             } else if let Some(path) = shell.prompt_file.as_deref() {
                 output.push_str(&format!(
                     "[ -f {} ] && . {} || true\n",
@@ -1356,6 +1360,86 @@ fn render_host_shell_runtime(
         }
     }
     output
+}
+
+fn classic_bash_prompt(host_home: &str) -> String {
+    format!(
+        r#"# Familiar sbxr prompt: host-style status, colors, path, and Git branch.
+__sbxr_host_home={}
+__sbxr_capture_prompt_status() {{
+  __sbxr_prompt_status=$?
+  return "$__sbxr_prompt_status"
+}}
+__sbxr_prompt_command() {{
+  local rc=${{__sbxr_prompt_status-$?}}
+  unset __sbxr_prompt_status
+  __sbxr_mark='[✓]'
+  [ "$rc" -eq 0 ] || __sbxr_mark='[✗]'
+  __sbxr_shown="$PWD"
+  case "$PWD" in
+    "$HOME") __sbxr_shown='~' ;;
+    "$HOME"/*) __sbxr_shown="~/${{PWD#"$HOME"/}}" ;;
+    "$__sbxr_host_home") __sbxr_shown='~' ;;
+    "$__sbxr_host_home"/*) __sbxr_shown="~/${{PWD#"$__sbxr_host_home"/}}" ;;
+  esac
+  __sbxr_branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || \
+    __sbxr_branch=$(git rev-parse --short HEAD 2>/dev/null) || __sbxr_branch=
+  if [ -n "$__sbxr_branch" ]; then
+    __sbxr_branch=" ($__sbxr_branch)"
+  else
+    __sbxr_branch=' '
+  fi
+  __sbxr_ending=' '
+  if (( ${{#__sbxr_shown}} > 25 )); then
+    __sbxr_ending=$'\n-> $ '
+  fi
+  # Keep untrusted path and branch text behind parameter references in PS1.
+  # Bash expands their values once and does not evaluate substitutions inside them.
+  case "${{TERM:-dumb}}" in
+    dumb) PS1='${{__sbxr_mark}}\u@\h${{__sbxr_shown}}${{__sbxr_branch}}\$${{__sbxr_ending}}' ;;
+    *) PS1='${{__sbxr_mark}}\[\e]0;\u@\h ${{__sbxr_shown}}\a\]\[\033[01;32m\]\u@\h\[\033[00m\]\[\033[01;34m\]${{__sbxr_shown}}\[\033[33m\]${{__sbxr_branch}}\[\033[01;34m\]\$\[\033[00m\]${{__sbxr_ending}}' ;;
+  esac
+}}
+__sbxr_install_prompt_command() {{
+  local declaration
+  declaration=$(declare -p PROMPT_COMMAND 2>/dev/null) || declaration=
+  if [[ "$declaration" == 'declare -a '* ]]; then
+    local hook
+    local -a previous=()
+    for hook in "${{PROMPT_COMMAND[@]}}"; do
+      case "$hook" in
+        __sbxr_capture_prompt_status|__sbxr_prompt_command) ;;
+        *) previous+=("$hook") ;;
+      esac
+    done
+    PROMPT_COMMAND=(
+      __sbxr_capture_prompt_status
+      "${{previous[@]}}"
+      __sbxr_prompt_command
+    )
+    return
+  fi
+  local previous=${{PROMPT_COMMAND:-}}
+  # Normalize a previous installation before rebuilding it. Colons retain
+  # valid shell grammar when another tool joined its hook with semicolons.
+  previous=${{previous//__sbxr_capture_prompt_status/:}}
+  previous=${{previous//__sbxr_prompt_command/:}}
+  previous=${{previous#$':\n'}}
+  previous=${{previous%$'\n:'}}
+  while [[ "$previous" == *$'\n:\n'* ]]; do
+    previous=${{previous//$'\n:\n'/$'\n'}}
+  done
+  if [ -n "$previous" ]; then
+    PROMPT_COMMAND=$'__sbxr_capture_prompt_status\n'"${{previous}}"$'\n__sbxr_prompt_command'
+  else
+    PROMPT_COMMAND=$'__sbxr_capture_prompt_status\n__sbxr_prompt_command'
+  fi
+}}
+__sbxr_install_prompt_command
+unset -f __sbxr_install_prompt_command
+"#,
+        shell_single_quote(host_home)
+    )
 }
 
 fn shell_home_expression(relative: &str) -> String {
@@ -2470,10 +2554,20 @@ mod tests {
             prompt: PromptStyle::Plain,
             ..ShellConfig::default()
         };
-        let rendered = render_host_shell_runtime(&bash, &bash.alias_files, &bash.bin_dirs, None);
+        let rendered =
+            render_host_shell_runtime(&bash, &bash.alias_files, &bash.bin_dirs, None, "/home/host");
         assert!(rendered.contains("$HOME\"/'.local/share/sbxr/host-shell/scripts'"));
         assert!(rendered.contains(".config/custom aliases"));
         assert!(rendered.contains("PS1="));
+
+        let classic = ShellConfig::default();
+        let rendered = render_host_shell_runtime(&classic, &[], &[], None, "/home/emi");
+        assert!(rendered.contains("__sbxr_host_home='/home/emi'"));
+        assert!(rendered.contains("__sbxr_mark='[✓]'"));
+        assert!(rendered.contains("PS1='${__sbxr_mark}"));
+        assert!(rendered.contains(
+            "PROMPT_COMMAND=$'__sbxr_capture_prompt_status\\n'\"${previous}\"$'\\n__sbxr_prompt_command'"
+        ));
 
         let fish = ShellConfig {
             program: ShellProgram::Fish,
@@ -2484,7 +2578,7 @@ mod tests {
             ".config/fish/conf.d/aliases.fish".to_owned(),
             ".config/fish/manual-aliases.fish".to_owned(),
         ];
-        let rendered = render_host_shell_runtime(&fish, &aliases, &[], None);
+        let rendered = render_host_shell_runtime(&fish, &aliases, &[], None, "/home/host");
         assert!(rendered.contains("function fish_prompt"));
         assert!(!rendered.contains("PS1="));
         // Mirrored files live outside ~/.config/fish, so fish never
@@ -2497,10 +2591,90 @@ mod tests {
             prompt: PromptStyle::Plain,
             ..ShellConfig::default()
         };
-        let rendered = render_host_shell_runtime(&minimal, &[], &[], None);
+        let rendered = render_host_shell_runtime(&minimal, &[], &[], None, "/home/host");
         assert!(!rendered.contains("__sbxr_path"));
         assert!(!rendered.contains("host-aliases"));
         assert!(!rendered.contains(".bash_aliases"));
+    }
+
+    #[test]
+    fn classic_prompt_does_not_execute_path_or_branch_substitutions() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "sbxr-prompt-injection-{}-{unique}",
+            std::process::id()
+        ));
+        let repository = root.join("$(touch PATH_PWNED)");
+        fs::create_dir_all(&repository).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .arg(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["-C"])
+                .arg(&repository)
+                .args(["checkout", "-q", "-b", "$(touch${IFS}BRANCH_PWNED)"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let runtime = root.join("runtime.bash");
+        fs::write(&runtime, classic_bash_prompt("/home/host")).unwrap();
+        let probe = r#"
+PROMPT_COMMAND='PS1=foreign; '
+. "$1"
+false
+eval "$PROMPT_COMMAND"
+[ "$__sbxr_mark" = '[✗]' ]
+[ "$PS1" != foreign ]
+printf '%s' "${PS1@P}" >/dev/null
+[ "$PROMPT_COMMAND" = $'__sbxr_capture_prompt_status\nPS1=foreign; \n__sbxr_prompt_command' ]
+. "$1"
+[ "$PROMPT_COMMAND" = $'__sbxr_capture_prompt_status\nPS1=foreign; \n__sbxr_prompt_command' ]
+PROMPT_COMMAND=$'PS1=before\n'"$PROMPT_COMMAND"$'\nPS1=after'
+. "$1"
+[ "$PROMPT_COMMAND" = $'__sbxr_capture_prompt_status\nPS1=before\nPS1=foreign; \nPS1=after\n__sbxr_prompt_command' ]
+PROMPT_COMMAND=('PS1=array-one' 'PS1=array-two')
+. "$1"
+[ "${#PROMPT_COMMAND[@]}" -eq 4 ]
+[ "${PROMPT_COMMAND[0]}" = __sbxr_capture_prompt_status ]
+[ "${PROMPT_COMMAND[3]}" = __sbxr_prompt_command ]
+PROMPT_COMMAND=('PS1=array-before' "${PROMPT_COMMAND[@]}" 'PS1=array-after')
+. "$1"
+[ "${#PROMPT_COMMAND[@]}" -eq 6 ]
+[ "${PROMPT_COMMAND[0]}" = __sbxr_capture_prompt_status ]
+[ "${PROMPT_COMMAND[5]}" = __sbxr_prompt_command ]
+false
+for hook in "${PROMPT_COMMAND[@]}"; do eval "$hook"; done
+[ "$__sbxr_mark" = '[✗]' ]
+[ "$PS1" != array-two ]
+printf '%s' "${PS1@P}" >/dev/null
+"#;
+        let output = Command::new("bash")
+            .args(["--noprofile", "--norc", "-c", probe, "bash"])
+            .arg(&runtime)
+            .current_dir(&repository)
+            .env("TERM", "xterm-256color")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!repository.join("PATH_PWNED").exists());
+        assert!(!repository.join("BRANCH_PWNED").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2989,6 +3163,7 @@ mod tests {
                     &aliases,
                     &bins,
                     Some(".config/sbxr/host-aliases.bash"),
+                    "/home/host",
                 );
                 let output = Command::new(binary)
                     .args(["-n", "-c", &rendered])

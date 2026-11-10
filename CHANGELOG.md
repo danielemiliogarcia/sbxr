@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.3.9] - 2026-11-10
+
+### Fixed
+
+- Sandbox lifecycle commands now start the Docker Sandboxes daemon when it is
+  stopped or asleep and wait up to 30 seconds for it to become ready. A fresh
+  `sbxr new` no longer fails just because the on-demand daemon has not started
+  yet.
+- Failed runtime probes are no longer cached for the lifetime of the `sbxr`
+  process. This lets the same launch continue after the daemon becomes ready,
+  while successful compatibility metadata is still cached.
+- An unavailable daemon is now recognized from `sbx version --json` even
+  though that response intentionally omits the running server's version and
+  API fields. Malformed metadata from a server that claims to be running is
+  still rejected.
+- `sbxr doctor` treats an intentionally stopped on-demand daemon as a warning,
+  skips daemon-dependent checks without waking it, and removes its unreachable
+  non-running-server branch. Successful auto-start reports now record the
+  eventual client, server, API, and state metadata.
+- Daemon readiness probes have a five-second per-call timeout within the
+  30-second overall deadline. An immediate start-command error gets one
+  readiness check for race tolerance and then fails promptly; automatic start
+  is limited to stopped/unavailable states. A concurrent launch that observes
+  the daemon already starting waits for readiness without issuing a second
+  start command.
+- VS Code now selects the profile-configured Bash, Zsh, or Fish executable as
+  its explicit remote login-shell profile before opening the window. New
+  terminals therefore cannot fall back to `/bin/sh`.
+- The default familiar Bash prompt now matches the host-style bracketed status,
+  green identity, blue path, yellow Git branch, and long-path wrapping. Shared
+  paths below the host home display with `~`, while arbitrary host `.bashrc`
+  code remains excluded. Untrusted path and branch names remain behind literal
+  prompt-variable references so command substitutions cannot execute, and an
+  existing `PROMPT_COMMAND` hook is preserved. Existing hooks run before the
+  final sbxr render, preventing Docker's base-image prompt hook from restoring
+  its colon-delimited prompt or colors afterward. Hook composition uses newline
+  boundaries so a pre-existing trailing semicolon remains valid, and repeated
+  loading reconciles prior sbxr entries instead of nesting them.
+
+### Tests
+
+- Added automated compatibility and daemon-start state-machine coverage,
+  including bounded transient-probe retries, concurrent-start waiting, and
+  immediate start-command failures, plus remote terminal-profile
+  reconciliation, generated-shell parsing, and malicious path/branch prompt
+  regression coverage. Also manually validated fresh creation and resume from
+  a fully stopped daemon.
+
 ## [0.3.8] - 2026-11-07
 
 ### Security
