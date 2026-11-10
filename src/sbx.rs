@@ -5,7 +5,8 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -23,7 +24,10 @@ const CLI_REFACTOR_VERSION: Version = Version {
 };
 
 static CAPABILITY_CHECK: OnceLock<Result<(), String>> = OnceLock::new();
-static RUNTIME_INFO: OnceLock<Result<RuntimeInfo, String>> = OnceLock::new();
+static RUNTIME_INFO: OnceLock<RuntimeInfo> = OnceLock::new();
+const DAEMON_START_WAIT: Duration = Duration::from_secs(30);
+const DAEMON_START_POLL: Duration = Duration::from_millis(250);
+const DAEMON_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct Version {
@@ -88,7 +92,29 @@ pub(crate) struct RuntimeInfo {
     pub(crate) server_state: String,
 }
 
+#[cfg(test)]
 impl RuntimeInfo {
+    fn parse(bytes: &[u8]) -> Result<Self, String> {
+        match RuntimeStatus::parse(bytes)? {
+            RuntimeStatus::Ready(info) => Ok(info),
+            RuntimeStatus::Unavailable { state, error, .. } => {
+                Err(unavailable_message(&state, error.as_deref()))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RuntimeStatus {
+    Ready(RuntimeInfo),
+    Unavailable {
+        client: Version,
+        state: String,
+        error: Option<String>,
+    },
+}
+
+impl RuntimeStatus {
     fn parse(bytes: &[u8]) -> Result<Self, String> {
         let document: serde_json::Value = serde_json::from_slice(bytes)
             .map_err(|error| format!("could not parse `sbx version --json`: {error}"))?;
@@ -100,14 +126,27 @@ impl RuntimeInfo {
         let server = document
             .get("server")
             .ok_or("`sbx version --json` has no server object")?;
-        let server_version = server
-            .get("version")
-            .and_then(serde_json::Value::as_str)
-            .ok_or("`sbx version --json` has no server.version string")?;
         let server_state = server
             .get("state")
             .and_then(serde_json::Value::as_str)
             .ok_or("`sbx version --json` has no server.state string")?;
+        let client = Version::parse(client)?;
+        if server_state != "running" {
+            let error = server
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .filter(|error| !error.trim().is_empty())
+                .map(str::to_owned);
+            return Ok(Self::Unavailable {
+                client,
+                state: server_state.to_owned(),
+                error,
+            });
+        }
+        let server_version = server
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("running `sbx version --json` server has no version string")?;
         let api_version = server
             .get("api_version")
             .and_then(serde_json::Value::as_str)
@@ -115,12 +154,12 @@ impl RuntimeInfo {
         if api_version.is_empty() {
             return Err("`sbx version --json` has an empty server.api_version".to_owned());
         }
-        Ok(Self {
-            client: Version::parse(client)?,
+        Ok(Self::Ready(RuntimeInfo {
+            client,
             server: Version::parse(server_version)?,
             api_version: api_version.to_owned(),
             server_state: server_state.to_owned(),
-        })
+        }))
     }
 }
 
@@ -159,14 +198,8 @@ pub(crate) fn interactive_exec_command(
 
 pub(crate) fn require_minimum_version(preserve_xdg_state: bool) -> Result<Version, String> {
     process::require("sbx")?;
-    let info = runtime_info(preserve_xdg_state)?;
+    let info = ready_runtime_info(preserve_xdg_state)?;
     validate_minimum_versions(&info)?;
-    if info.server_state != "running" {
-        return Err(format!(
-            "Docker Sandboxes server is {}; run `sbx daemon start --detach` and retry",
-            info.server_state
-        ));
-    }
     CAPABILITY_CHECK
         .get_or_init(|| validate_cli_capabilities(preserve_xdg_state))
         .clone()?;
@@ -174,22 +207,211 @@ pub(crate) fn require_minimum_version(preserve_xdg_state: bool) -> Result<Versio
 }
 
 pub(crate) fn runtime_info(preserve_xdg_state: bool) -> Result<RuntimeInfo, String> {
-    RUNTIME_INFO
-        .get_or_init(|| {
-            let output = process::output_checked(
-                command(preserve_xdg_state).args(["version", "--json"]),
-                "reading Docker Sandboxes client/server versions",
-            )?;
-            RuntimeInfo::parse(&output.stdout)
-        })
-        .clone()
+    match runtime_status(preserve_xdg_state)? {
+        RuntimeStatus::Ready(info) => Ok(info),
+        RuntimeStatus::Unavailable { state, error, .. } => {
+            Err(unavailable_message(&state, error.as_deref()))
+        }
+    }
+}
+
+pub(crate) fn runtime_status(preserve_xdg_state: bool) -> Result<RuntimeStatus, String> {
+    if let Some(info) = RUNTIME_INFO.get() {
+        return Ok(RuntimeStatus::Ready(info.clone()));
+    }
+    match probe_runtime(preserve_xdg_state)? {
+        RuntimeStatus::Ready(info) => Ok(RuntimeStatus::Ready(cache_runtime_info(info))),
+        unavailable @ RuntimeStatus::Unavailable { .. } => Ok(unavailable),
+    }
+}
+
+fn ready_runtime_info(preserve_xdg_state: bool) -> Result<RuntimeInfo, String> {
+    match runtime_status(preserve_xdg_state)? {
+        RuntimeStatus::Ready(info) => Ok(info),
+        RuntimeStatus::Unavailable {
+            client,
+            state,
+            error: _,
+        } if automatic_start_state(&state) => {
+            start_daemon_and_wait(preserve_xdg_state, client, state)
+        }
+        RuntimeStatus::Unavailable {
+            client,
+            state,
+            error: _,
+        } if wait_for_start_state(&state) => {
+            wait_for_daemon_start(preserve_xdg_state, client, state)
+        }
+        RuntimeStatus::Unavailable { state, error, .. } => Err(format!(
+            "{}; automatic recovery is only attempted when the daemon is stopped, unavailable, or already starting\nRun `sbx diagnose` before retrying.",
+            unavailable_message(&state, error.as_deref())
+        )),
+    }
+}
+
+fn automatic_start_state(state: &str) -> bool {
+    matches!(state, "stopped" | "unavailable")
+}
+
+fn wait_for_start_state(state: &str) -> bool {
+    state == "starting"
+}
+
+fn probe_runtime(preserve_xdg_state: bool) -> Result<RuntimeStatus, String> {
+    probe_runtime_with_timeout(preserve_xdg_state, DAEMON_PROBE_TIMEOUT)
+}
+
+fn probe_runtime_with_timeout(
+    preserve_xdg_state: bool,
+    timeout: Duration,
+) -> Result<RuntimeStatus, String> {
+    let output = process::output_checked_timeout(
+        command(preserve_xdg_state).args(["version", "--json"]),
+        "reading Docker Sandboxes client/server versions",
+        timeout,
+    )?;
+    RuntimeStatus::parse(&output.stdout)
+}
+
+fn cache_runtime_info(info: RuntimeInfo) -> RuntimeInfo {
+    let _ = RUNTIME_INFO.set(info.clone());
+    RUNTIME_INFO.get().cloned().unwrap_or(info)
+}
+
+fn start_daemon_and_wait(
+    preserve_xdg_state: bool,
+    client: Version,
+    initial_state: String,
+) -> Result<RuntimeInfo, String> {
+    validate_minimum_client(client)?;
+    println!("==> Docker Sandboxes daemon is {initial_state}; starting it");
+    let info = start_daemon_and_wait_with(
+        || {
+            process::run_checked(
+                command(preserve_xdg_state).args(["daemon", "start", "--detach"]),
+                "starting the Docker Sandboxes daemon",
+            )
+        },
+        |timeout| probe_runtime_with_timeout(preserve_xdg_state, timeout),
+        thread::sleep,
+    )?;
+    println!("ok   Docker Sandboxes daemon is running");
+    Ok(cache_runtime_info(info))
+}
+
+fn wait_for_daemon_start(
+    preserve_xdg_state: bool,
+    client: Version,
+    initial_state: String,
+) -> Result<RuntimeInfo, String> {
+    validate_minimum_client(client)?;
+    println!("==> Docker Sandboxes daemon is {initial_state}; waiting for it");
+    let info = wait_for_daemon_with(
+        |timeout| probe_runtime_with_timeout(preserve_xdg_state, timeout),
+        thread::sleep,
+    )?;
+    println!("ok   Docker Sandboxes daemon is running");
+    Ok(cache_runtime_info(info))
+}
+
+fn start_daemon_and_wait_with<Start, Probe, Pause>(
+    mut start: Start,
+    probe: Probe,
+    pause: Pause,
+) -> Result<RuntimeInfo, String>
+where
+    Start: FnMut() -> Result<(), String>,
+    Probe: FnMut(Duration) -> Result<RuntimeStatus, String>,
+    Pause: FnMut(Duration),
+{
+    let start_error = start().err();
+    wait_for_daemon_ready_with(probe, pause, start_error)
+}
+
+fn wait_for_daemon_with<Probe, Pause>(probe: Probe, pause: Pause) -> Result<RuntimeInfo, String>
+where
+    Probe: FnMut(Duration) -> Result<RuntimeStatus, String>,
+    Pause: FnMut(Duration),
+{
+    wait_for_daemon_ready_with(probe, pause, None)
+}
+
+fn wait_for_daemon_ready_with<Probe, Pause>(
+    mut probe: Probe,
+    mut pause: Pause,
+    start_error: Option<String>,
+) -> Result<RuntimeInfo, String>
+where
+    Probe: FnMut(Duration) -> Result<RuntimeStatus, String>,
+    Pause: FnMut(Duration),
+{
+    let started = Instant::now();
+    let mut first_probe = true;
+    loop {
+        let remaining = DAEMON_START_WAIT.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(daemon_start_timeout(
+                "no successful readiness probe",
+                start_error.as_deref(),
+            ));
+        }
+        let failure = match probe(DAEMON_PROBE_TIMEOUT.min(remaining)) {
+            Ok(RuntimeStatus::Ready(info)) => return Ok(info),
+            Ok(RuntimeStatus::Unavailable { state, error, .. }) => {
+                unavailable_message(&state, error.as_deref())
+            }
+            Err(error) => error,
+        };
+        if first_probe {
+            first_probe = false;
+            if let Some(error) = &start_error {
+                return Err(format!(
+                    "Docker Sandboxes daemon start failed: {error}\nReadiness probe: {failure}\nRun `sbx diagnose` before retrying."
+                ));
+            }
+        }
+        if started.elapsed() >= DAEMON_START_WAIT {
+            return Err(daemon_start_timeout(&failure, start_error.as_deref()));
+        }
+        pause(DAEMON_START_POLL.min(DAEMON_START_WAIT.saturating_sub(started.elapsed())));
+    }
+}
+
+fn daemon_start_timeout(failure: &str, start_error: Option<&str>) -> String {
+    let mut message = format!(
+        "Docker Sandboxes daemon did not become ready within {} seconds: {failure}",
+        DAEMON_START_WAIT.as_secs()
+    );
+    if let Some(error) = start_error {
+        message.push_str("\nDaemon start command: ");
+        message.push_str(error);
+    }
+    message.push_str("\nRun `sbx diagnose` if the daemon cannot start.");
+    message
+}
+
+fn unavailable_message(state: &str, error: Option<&str>) -> String {
+    match error {
+        Some(error) => format!("Docker Sandboxes server is {state}: {error}"),
+        None => format!("Docker Sandboxes server is {state}"),
+    }
 }
 
 pub(crate) fn validate_minimum_versions(info: &RuntimeInfo) -> Result<(), String> {
-    if info.client < MINIMUM_VERSION || info.server < MINIMUM_VERSION {
+    validate_minimum_client(info.client)?;
+    if info.server < MINIMUM_VERSION {
         return Err(format!(
             "Docker Sandboxes client {} and server {} must both be >= {MINIMUM_VERSION} for Kits v3 declarative environments\nUpdate Docker Sandboxes: https://docs.docker.com/ai/sandboxes/install/",
             info.client, info.server
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_minimum_client(client: Version) -> Result<(), String> {
+    if client < MINIMUM_VERSION {
+        return Err(format!(
+            "Docker Sandboxes client {client} must be >= {MINIMUM_VERSION}\nUpdate Docker Sandboxes: https://docs.docker.com/ai/sandboxes/install/"
         ));
     }
     Ok(())
@@ -496,6 +718,128 @@ mod tests {
         assert_eq!(info.server.to_string(), "0.51.0");
         assert_eq!(info.api_version, "0.49.0");
         assert!(RuntimeInfo::parse(br#"{"client":{"version":"v0.51.0"}}"#).is_err());
+    }
+
+    #[test]
+    fn recognizes_an_unavailable_daemon_without_server_metadata() {
+        let document = br#"{
+          "client":{"version":"v0.51.0"},
+          "server":{"state":"unavailable","error":"connection refused"}
+        }"#;
+        assert_eq!(
+            RuntimeStatus::parse(document).unwrap(),
+            RuntimeStatus::Unavailable {
+                client: MINIMUM_VERSION,
+                state: "unavailable".to_owned(),
+                error: Some("connection refused".to_owned()),
+            }
+        );
+        let error = RuntimeInfo::parse(document).unwrap_err();
+        assert!(error.contains("server is unavailable"));
+        assert!(error.contains("connection refused"));
+    }
+
+    #[test]
+    fn requires_server_metadata_when_the_daemon_reports_running() {
+        let error = RuntimeStatus::parse(
+            br#"{"client":{"version":"v0.51.0"},"server":{"state":"running"}}"#,
+        )
+        .unwrap_err();
+        assert!(error.contains("running"));
+        assert!(error.contains("version"));
+    }
+
+    #[test]
+    fn stopped_daemon_start_retries_bounded_probes_until_ready() {
+        let ready = RuntimeInfo::parse(include_bytes!("../tests/fixtures/sbx-version-0.51.0.json"))
+            .unwrap();
+        let expected = ready.clone();
+        let mut starts = 0;
+        let mut probes = 0;
+        let result = start_daemon_and_wait_with(
+            || {
+                starts += 1;
+                Ok(())
+            },
+            |timeout| {
+                probes += 1;
+                assert!(timeout <= DAEMON_PROBE_TIMEOUT);
+                match probes {
+                    1 => Ok(RuntimeStatus::Unavailable {
+                        client: MINIMUM_VERSION,
+                        state: "unavailable".to_owned(),
+                        error: Some("daemon starting".to_owned()),
+                    }),
+                    2 => Err("transient probe failure".to_owned()),
+                    _ => Ok(RuntimeStatus::Ready(ready.clone())),
+                }
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(result, expected);
+        assert_eq!(starts, 1);
+        assert_eq!(probes, 3);
+    }
+
+    #[test]
+    fn failed_daemon_start_gets_one_readiness_probe_then_returns() {
+        let mut probes = 0;
+        let error = start_daemon_and_wait_with(
+            || Err("permission denied".to_owned()),
+            |_| {
+                probes += 1;
+                Ok(RuntimeStatus::Unavailable {
+                    client: MINIMUM_VERSION,
+                    state: "unavailable".to_owned(),
+                    error: Some("daemon not running".to_owned()),
+                })
+            },
+            |_| panic!("a failed start must not enter the retry loop"),
+        )
+        .unwrap_err();
+        assert_eq!(probes, 1);
+        assert!(error.contains("permission denied"));
+        assert!(error.contains("daemon not running"));
+    }
+
+    #[test]
+    fn automatic_start_is_limited_to_stopped_states() {
+        assert!(automatic_start_state("unavailable"));
+        assert!(automatic_start_state("stopped"));
+        assert!(!automatic_start_state("starting"));
+        assert!(!automatic_start_state("stopping"));
+        assert!(!automatic_start_state("error"));
+        assert!(wait_for_start_state("starting"));
+        assert!(!wait_for_start_state("stopped"));
+        assert!(!wait_for_start_state("error"));
+    }
+
+    #[test]
+    fn concurrent_launch_waits_for_an_already_starting_daemon() {
+        let ready = RuntimeInfo::parse(include_bytes!("../tests/fixtures/sbx-version-0.51.0.json"))
+            .unwrap();
+        let expected = ready.clone();
+        let mut probes = 0;
+        let result = wait_for_daemon_with(
+            |timeout| {
+                probes += 1;
+                assert!(timeout <= DAEMON_PROBE_TIMEOUT);
+                if probes == 1 {
+                    Ok(RuntimeStatus::Unavailable {
+                        client: MINIMUM_VERSION,
+                        state: "starting".to_owned(),
+                        error: None,
+                    })
+                } else {
+                    Ok(RuntimeStatus::Ready(ready.clone()))
+                }
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(result, expected);
+        assert_eq!(probes, 2);
     }
 
     #[test]

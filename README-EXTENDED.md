@@ -57,6 +57,9 @@ sbxr new .
 `setup` explains how to install any missing system prerequisite and can be
 rerun safely. An existing Rust project directory works in place of the empty
 directory above; an empty directory is initialized with Cargo automatically.
+Lifecycle commands start Docker's on-demand sandbox daemon when needed and
+wait for it to become ready, so a sleeping daemon does not require a separate
+`sbx daemon start` step.
 
 ## Prerequisites
 
@@ -86,9 +89,11 @@ when needed. It reports missing host software with installation guidance, but
 does not install system packages or invoke `sudo`.
 
 Before lifecycle operations, sbxr parses Docker's client, server, state, and
-API versions and probes the exact CLI capabilities it relies on. It rejects an
-old client, an old or unavailable server, or a partially compatible command
-surface with an actionable upgrade error instead of guessing across releases.
+API versions and probes the exact CLI capabilities it relies on. It starts a
+stopped on-demand daemon and waits up to 30 seconds for readiness. It rejects
+an old client or server, a daemon that cannot become ready, or a partially
+compatible command surface with an actionable error instead of guessing
+across releases.
 
 To build `sbxr` or contribute a feature, see the
 [development guide](DEVELOPMENT.md).

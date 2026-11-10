@@ -134,7 +134,10 @@ pub(crate) fn run() -> Result<i32, String> {
     })();
     match result {
         Ok(code) => {
-            if let Some(report) = report {
+            if let Some(mut report) = report {
+                if let Ok(info) = sbx::runtime_info(context.preserve_xdg_state) {
+                    report.runtime(&info)?;
+                }
                 println!("diagnostic report: {}", report.complete()?.display());
             }
             Ok(code)

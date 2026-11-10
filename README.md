@@ -55,6 +55,9 @@ sbxr new .
 `setup` explains how to install any missing system prerequisite and can be
 rerun safely. An existing Rust project directory works in place of the empty
 directory above; an empty directory is initialized with Cargo automatically.
+Lifecycle commands start Docker's on-demand sandbox daemon when needed and
+wait for it to become ready, so a sleeping daemon does not require a separate
+`sbx daemon start` step.
 
 ## What it includes
 

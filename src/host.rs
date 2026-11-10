@@ -480,35 +480,50 @@ pub(crate) fn doctor(context: &Context, preset: Preset, rocksdb: Option<&RocksDb
     }
 
     if process::command_exists("sbx") {
-        let sbx_version = match sbx::runtime_info(context.preserve_xdg_state) {
-            Ok(info) if sbx::validate_minimum_versions(&info).is_ok() => {
+        let sbx_version = match sbx::runtime_status(context.preserve_xdg_state) {
+            Ok(sbx::RuntimeStatus::Ready(info))
+                if sbx::validate_minimum_versions(&info).is_ok() =>
+            {
                 println!(
                     "ok   Docker Sandboxes client {} · server {} · API {} (minimum 0.51.0 for Kits v3)",
                     info.client, info.server, info.api_version
                 );
-                if info.server_state != "running" {
-                    println!(
-                        "WARN Docker Sandboxes server is {}; start it with `sbx daemon start --detach` before creating or using a sandbox",
-                        info.server_state
-                    );
-                    None
-                } else {
-                    match sbx::require_minimum_version(context.preserve_xdg_state) {
-                        Ok(version) => Some(version),
-                        Err(error) => {
-                            println!("FAIL {error}");
-                            healthy = false;
-                            None
-                        }
+                match sbx::require_minimum_version(context.preserve_xdg_state) {
+                    Ok(version) => Some(version),
+                    Err(error) => {
+                        println!("FAIL {error}");
+                        healthy = false;
+                        None
                     }
                 }
             }
-            Ok(info) => {
+            Ok(sbx::RuntimeStatus::Ready(info)) => {
                 let error = sbx::validate_minimum_versions(&info).unwrap_err();
                 println!("FAIL {error}");
                 healthy = false;
                 None
             }
+            Ok(sbx::RuntimeStatus::Unavailable {
+                client,
+                state,
+                error,
+            }) => match sbx::validate_minimum_client(client) {
+                Ok(()) => {
+                    println!(
+                        "WARN Docker Sandboxes client {client} is installed, but the on-demand daemon is {state}{}",
+                        error.map_or(String::new(), |error| format!(": {error}"))
+                    );
+                    println!(
+                        "info lifecycle commands will start the daemon automatically; daemon-dependent doctor checks were skipped"
+                    );
+                    None
+                }
+                Err(error) => {
+                    println!("FAIL {error}");
+                    healthy = false;
+                    None
+                }
+            },
             Err(error) => {
                 println!("FAIL {error}");
                 healthy = false;
@@ -529,70 +544,74 @@ pub(crate) fn doctor(context: &Context, preset: Preset, rocksdb: Option<&RocksDb
                     healthy = false;
                 }
             }
-        }
-        if preset.has_codex() {
+            if preset.has_codex() {
+                match sbx::command(context.preserve_xdg_state)
+                    .args(["secret", "ls", "--service", "openai"])
+                    .output()
+                {
+                    Ok(output)
+                        if output.status.success()
+                            && String::from_utf8_lossy(&output.stdout)
+                                .contains("oauth configured") =>
+                    {
+                        println!("ok   Docker host-managed OpenAI OAuth")
+                    }
+                    _ => {
+                        println!("FAIL OpenAI OAuth is missing; run `sbxr setup`");
+                        healthy = false;
+                    }
+                }
+            }
+            if preset.has_claude() {
+                match sbx::command(context.preserve_xdg_state)
+                    .args(["secret", "ls", "--service", "anthropic"])
+                    .output()
+                {
+                    Ok(output)
+                        if output.status.success()
+                            && String::from_utf8_lossy(&output.stdout)
+                                .contains("oauth configured") =>
+                    {
+                        println!("ok   Docker host-managed Anthropic OAuth")
+                    }
+                    _ => {
+                        println!(
+                            "FAIL Anthropic OAuth is missing; create a sandbox, run `sbxr claude .`, and complete `/login` once"
+                        );
+                        healthy = false;
+                    }
+                }
+            }
             match sbx::command(context.preserve_xdg_state)
-                .args(["secret", "ls", "--service", "openai"])
+                .args(["policy", "ls"])
                 .output()
             {
                 Ok(output)
                     if output.status.success()
-                        && String::from_utf8_lossy(&output.stdout).contains("oauth configured") =>
+                        && String::from_utf8_lossy(&output.stdout).contains("default-deny-all") =>
                 {
-                    println!("ok   Docker host-managed OpenAI OAuth")
+                    println!("ok   global network policy is deny-all")
                 }
-                _ => {
-                    println!("FAIL OpenAI OAuth is missing; run `sbxr setup`");
-                    healthy = false;
-                }
+                _ => println!(
+                    "WARN global network policy is not deny-all; isolation still applies, but egress is broader"
+                ),
             }
-        }
-        if preset.has_claude() {
-            match sbx::command(context.preserve_xdg_state)
-                .args(["secret", "ls", "--service", "anthropic"])
-                .output()
-            {
-                Ok(output)
-                    if output.status.success()
-                        && String::from_utf8_lossy(&output.stdout).contains("oauth configured") =>
-                {
-                    println!("ok   Docker host-managed Anthropic OAuth")
-                }
-                _ => {
-                    println!(
-                        "FAIL Anthropic OAuth is missing; create a sandbox, run `sbxr claude .`, and complete `/login` once"
-                    );
-                    healthy = false;
-                }
-            }
-        }
-        match sbx::command(context.preserve_xdg_state)
-            .args(["policy", "ls"])
-            .output()
-        {
-            Ok(output)
-                if output.status.success()
-                    && String::from_utf8_lossy(&output.stdout).contains("default-deny-all") =>
-            {
-                println!("ok   global network policy is deny-all")
-            }
-            _ => println!(
-                "WARN global network policy is not deny-all; isolation still applies, but egress is broader"
-            ),
         }
 
-        for kit in embedded::KIT_NAMES {
-            let path = context.kit_root.join(kit);
-            let status = sbx::command(context.preserve_xdg_state)
-                .args(["kit", "validate"])
-                .arg(&path)
-                .stdout(Stdio::null())
-                .status();
-            if matches!(status, Ok(status) if status.success()) {
-                println!("ok   kit {kit}");
-            } else {
-                println!("FAIL kit {kit}: {}", path.display());
-                healthy = false;
+        if sbx_version.is_some() {
+            for kit in embedded::KIT_NAMES {
+                let path = context.kit_root.join(kit);
+                let status = sbx::command(context.preserve_xdg_state)
+                    .args(["kit", "validate"])
+                    .arg(&path)
+                    .stdout(Stdio::null())
+                    .status();
+                if matches!(status, Ok(status) if status.success()) {
+                    println!("ok   kit {kit}");
+                } else {
+                    println!("FAIL kit {kit}: {}", path.display());
+                    healthy = false;
+                }
             }
         }
     }
