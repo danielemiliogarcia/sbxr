@@ -57,7 +57,10 @@ rerun safely. An existing Rust project directory works in place of the empty
 directory above; an empty directory is initialized with Cargo automatically.
 Lifecycle commands start Docker's on-demand sandbox daemon when needed and
 wait for it to become ready, so a sleeping daemon does not require a separate
-`sbx daemon start` step.
+`sbx daemon start` step. Docker Sandboxes 0.54 also requires a one-time global
+network-policy choice: if none exists, sbxr initializes Docker's `deny-all`
+baseline and relies on each selected kit's explicit endpoint declarations.
+An existing global policy is preserved unchanged.
 
 ## What it includes
 
@@ -65,7 +68,8 @@ The default `rust-multi-agent` preset combines:
 
 - Docker's digest-pinned official Kits v3 Codex workload and Claude mixin,
   with host-managed ChatGPT and Claude subscription OAuth;
-- pinned Rust 1.99.1 tooling, Cargo security tools, and a host-style colored,
+- pinned Rust 1.100.0 tooling, Cargo security tools, a default three-day Cargo
+  dependency cooldown, and a host-style colored,
   Git-aware Bash prompt, plus `nano`, Bash/Git completion, an explicit VS Code
   login-shell profile, and a generated `en_US.UTF-8` locale for clean remote
   terminals;
@@ -167,10 +171,12 @@ private in-VM clone until the developer explicitly retrieves them.
 
 ## Limitations
 
-Docker's `.sbxenv.yaml`/`sbx env` and Kits v3 interfaces remain evolving in
-Docker Sandboxes 0.51. sbxr centralizes those dependencies, validates both
-runtime sides and required capabilities, and keeps structured compatibility
-fixtures, but a future Docker release can still require a compatibility update.
+Docker's `.sbxenv.yaml`/`sbx env` and Kits v3 interfaces remain evolving. sbxr
+requires 0.51.0 or newer and is live-tested with Docker Sandboxes 0.54.0
+(client/server 0.54.0, API 0.52.0). It centralizes those dependencies,
+validates both runtime sides and required capabilities, and keeps structured
+compatibility fixtures, but a future Docker release can still require an
+update.
 
 After a microVM stop, VS Code Remote-SSH may restore terminal tabs but lose their scrollback due to a VS Code limitation/bug; [details and tested versions](PLATFORM_SUPPORT.md#vscode-state-across-a-microvm-stop).
 

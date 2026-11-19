@@ -44,7 +44,7 @@ least-privilege accounts and review consequential operations.
 | Integration | Reusable credential location | Guest-visible authentication | Important limits |
 |---|---|---|---|
 | Codex / ChatGPT | Docker host OpenAI OAuth store | Docker-managed OpenAI sentinel and official Codex configuration | Guest code can consume the subscription and available tools |
-| Claude Code | Docker host Anthropic OAuth store | Docker-managed Anthropic access/refresh sentinels | The first native `/login` is completed through Claude so Docker can capture the OAuth exchange; do not copy a host Claude credential file |
+| Claude Code | Docker host Anthropic OAuth store | Docker-managed Anthropic access/refresh sentinels, reasserted by sbxr on every launch | The first native `/login` is completed through Claude so Docker can capture the OAuth exchange; do not copy a host Claude credential file |
 | Pi with Codex | Same host OpenAI OAuth as Codex | Managed `openai-codex` sentinel entry | A narrow compatibility patch recognizes only Docker's exact sentinel; sbxr reasserts the managed entry on every launch |
 | Pi with Claude | Same host Anthropic OAuth as Claude | Managed Anthropic access/refresh sentinel entry | May use Anthropic's separately billed third-party OAuth route; do not use Pi `/login` for this integration |
 | GitHub HTTPS/API and `gh` | Host `gh` login, obtained by Docker through `/usr/bin/gh auth token` | Docker GitHub proxy sentinel | The agent can perform every GitHub action allowed by the host token |
@@ -97,6 +97,13 @@ Later renewals use the same proxy-captured native flow:
 ```bash
 sbxr auth renew anthropic .
 ```
+
+Claude may blank or rewrite its guest credential file after an expired refresh.
+Before normal reuse, sbxr atomically restores the exact non-secret sentinel
+schema at private permissions. Anthropic renewal restores the sentinel even
+when the interactive login is cancelled or fails, then the normal guest audit
+checks the result. Real access and refresh tokens remain in Docker's host
+store.
 
 ### GitHub and GHCR
 

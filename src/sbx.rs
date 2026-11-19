@@ -23,6 +23,12 @@ const CLI_REFACTOR_VERSION: Version = Version {
     patch: 0,
 };
 
+const PORT_SUBCOMMAND_VERSION: Version = Version {
+    major: 0,
+    minor: 54,
+    patch: 0,
+};
+
 static CAPABILITY_CHECK: OnceLock<Result<(), String>> = OnceLock::new();
 static RUNTIME_INFO: OnceLock<RuntimeInfo> = OnceLock::new();
 const DAEMON_START_WAIT: Duration = Duration::from_secs(30);
@@ -201,7 +207,7 @@ pub(crate) fn require_minimum_version(preserve_xdg_state: bool) -> Result<Versio
     let info = ready_runtime_info(preserve_xdg_state)?;
     validate_minimum_versions(&info)?;
     CAPABILITY_CHECK
-        .get_or_init(|| validate_cli_capabilities(preserve_xdg_state))
+        .get_or_init(|| validate_cli_capabilities(preserve_xdg_state, info.client))
         .clone()?;
     Ok(info.client)
 }
@@ -417,10 +423,18 @@ pub(crate) fn validate_minimum_client(client: Version) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_cli_capabilities(preserve_xdg_state: bool) -> Result<(), String> {
+fn validate_cli_capabilities(
+    preserve_xdg_state: bool,
+    client_version: Version,
+) -> Result<(), String> {
+    let port_help = if client_version >= PORT_SUBCOMMAND_VERSION {
+        &["port", "ls", "--help"][..]
+    } else {
+        &["ports", "--help"][..]
+    };
     for (arguments, required) in [
         (&["env", "run", "--help"][..], &["--force", "--detach"][..]),
-        (&["ports", "--help"][..], &["--json"][..]),
+        (port_help, &["--json"][..]),
     ] {
         let output = process::output_checked(
             command(preserve_xdg_state).args(arguments),
@@ -506,10 +520,14 @@ pub(crate) fn published_host_port(
     sandbox_name: &str,
     sandbox_port: u16,
 ) -> Result<u16, String> {
-    let output = process::output_checked(
-        command(preserve_xdg_state).args(["ports", sandbox_name, "--json"]),
-        "reading sandbox port mappings",
-    )?;
+    let client_version = runtime_info(preserve_xdg_state)?.client;
+    let mut command = command(preserve_xdg_state);
+    if client_version >= PORT_SUBCOMMAND_VERSION {
+        command.args(["port", "ls", sandbox_name, "--json"]);
+    } else {
+        command.args(["ports", sandbox_name, "--json"]);
+    }
+    let output = process::output_checked(&mut command, "reading sandbox port mappings")?;
     parse_published_host_port(&output.stdout, sandbox_port)
 }
 
@@ -575,10 +593,130 @@ pub(crate) fn setup_ssh(preserve_xdg_state: bool) -> Result<(), String> {
 }
 
 pub(crate) fn diagnose_json(preserve_xdg_state: bool, version: Version) -> Result<Output, String> {
-    process::output_checked(
-        command(preserve_xdg_state).args(["diagnose", version.diagnose_format_flag(), "json"]),
-        "running Docker Sandboxes diagnostics",
-    )
+    let output = command(preserve_xdg_state)
+        .args(["diagnose", version.diagnose_format_flag(), "json"])
+        .output()
+        .map_err(|error| format!("could not run Docker Sandboxes diagnostics: {error}"))?;
+    if output.status.success() || !output.stdout.is_empty() {
+        return Ok(output);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(format!(
+        "running Docker Sandboxes diagnostics failed with {}{}",
+        output.status,
+        if stderr.trim().is_empty() {
+            String::new()
+        } else {
+            format!(": {}", stderr.trim())
+        }
+    ))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GlobalNetworkPolicyState {
+    Initialized,
+    Uninitialized,
+}
+
+fn global_network_policy_state(bytes: &[u8]) -> Result<GlobalNetworkPolicyState, String> {
+    let document: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("could not parse `sbx diagnose` JSON: {error}"))?;
+    let checks = document
+        .get("checks")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("`sbx diagnose` JSON has no checks array")?;
+    let check = checks
+        .iter()
+        .find(|check| {
+            check.get("id").and_then(serde_json::Value::as_str) == Some("global-network-policy")
+        })
+        .ok_or("`sbx diagnose` JSON has no global-network-policy check")?;
+    let status = check
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("Docker global-network-policy diagnostic has no status")?;
+    let message = check
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    match (status, message) {
+        ("pass", _) => Ok(GlobalNetworkPolicyState::Initialized),
+        ("fail", "not initialized") => Ok(GlobalNetworkPolicyState::Uninitialized),
+        ("fail", _) => Err(format!(
+            "Docker global network policy check failed{}",
+            if message.is_empty() {
+                String::new()
+            } else {
+                format!(": {message}")
+            }
+        )),
+        _ => Err(format!(
+            "Docker global network policy check returned unexpected status {status:?}"
+        )),
+    }
+}
+
+fn policy_list_is_initialized(bytes: &[u8]) -> Result<(), String> {
+    let document: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|error| format!("could not parse `sbx policy ls --json`: {error}"))?;
+    document
+        .get("rules")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("`sbx policy ls --json` has no rules array")?;
+    Ok(())
+}
+
+pub(crate) fn ensure_global_network_policy(
+    preserve_xdg_state: bool,
+    version: Version,
+) -> Result<(), String> {
+    let policy_list = command(preserve_xdg_state)
+        .args(["policy", "ls", "--json"])
+        .output()
+        .map_err(|error| format!("could not list Docker's global network policy: {error}"))?;
+    if policy_list.status.success() {
+        return policy_list_is_initialized(&policy_list.stdout);
+    }
+
+    let current = diagnose_json(preserve_xdg_state, version)?;
+    match global_network_policy_state(&current.stdout)? {
+        GlobalNetworkPolicyState::Uninitialized => {}
+        GlobalNetworkPolicyState::Initialized => {
+            let stderr = String::from_utf8_lossy(&policy_list.stderr);
+            return Err(format!(
+                "listing Docker's global network policy failed with {}{}",
+                policy_list.status,
+                if stderr.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", stderr.trim())
+                }
+            ));
+        }
+    }
+
+    println!("==> initializing Docker's global network policy to deny-all");
+    let initialization = process::run_checked(
+        command(preserve_xdg_state).args(["policy", "init", "deny-all"]),
+        "initializing Docker's global network policy",
+    );
+
+    // A concurrent sbxr launch may initialize the one-time policy after our
+    // diagnostic but before our command. Re-read structured state before
+    // treating that race as a failure.
+    let verified = diagnose_json(preserve_xdg_state, version)
+        .and_then(|output| global_network_policy_state(&output.stdout));
+    match (initialization, verified) {
+        (_, Ok(GlobalNetworkPolicyState::Initialized)) => {
+            println!("ok   Docker global network policy is initialized");
+            Ok(())
+        }
+        (Err(error), _) => Err(error),
+        (Ok(()), Ok(GlobalNetworkPolicyState::Uninitialized)) => {
+            Err("Docker global network policy remains uninitialized".to_owned())
+        }
+        (Ok(()), Err(error)) => Err(error),
+    }
 }
 
 pub(crate) fn env_ensure_up(
@@ -718,6 +856,13 @@ mod tests {
         assert_eq!(info.server.to_string(), "0.51.0");
         assert_eq!(info.api_version, "0.49.0");
         assert!(RuntimeInfo::parse(br#"{"client":{"version":"v0.51.0"}}"#).is_err());
+
+        let current =
+            RuntimeInfo::parse(include_bytes!("../tests/fixtures/sbx-version-0.54.0.json"))
+                .unwrap();
+        assert_eq!(current.client.to_string(), "0.54.0");
+        assert_eq!(current.server.to_string(), "0.54.0");
+        assert_eq!(current.api_version, "0.52.0");
     }
 
     #[test]
@@ -859,12 +1004,22 @@ mod tests {
 
     #[test]
     fn finds_sandbox_state_in_current_docker_json() {
-        let json = include_bytes!("../tests/fixtures/sbx-list-0.51.0.json");
-        assert_eq!(
-            sandbox_state(json, "rust-multi-fixture").unwrap(),
-            Some("running".to_owned())
-        );
-        assert_eq!(sandbox_state(json, "rust-multi-missing").unwrap(), None);
+        for (json, name) in [
+            (
+                include_bytes!("../tests/fixtures/sbx-list-0.51.0.json").as_slice(),
+                "rust-multi-fixture",
+            ),
+            (
+                include_bytes!("../tests/fixtures/sbx-list-0.54.0.json").as_slice(),
+                "rust-multi-fixture-054",
+            ),
+        ] {
+            assert_eq!(
+                sandbox_state(json, name).unwrap(),
+                Some("running".to_owned())
+            );
+            assert_eq!(sandbox_state(json, "rust-multi-missing").unwrap(), None);
+        }
     }
 
     #[test]
@@ -882,6 +1037,10 @@ mod tests {
         let current = Version::parse("sbx version v0.48.0").unwrap();
         assert_eq!(current.diagnose_format_flag(), "--format");
         assert_eq!(current.env_detach_flag(), "--detach");
+        assert!(current < PORT_SUBCOMMAND_VERSION);
+
+        let port_subcommand = Version::parse("sbx version v0.54.0").unwrap();
+        assert!(port_subcommand >= PORT_SUBCOMMAND_VERSION);
     }
 
     #[test]
@@ -893,10 +1052,62 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_uninitialized_and_initialized_global_network_policy() {
+        let uninitialized = br#"{
+          "checks": [
+            {"id":"daemon","status":"pass","message":"healthy"},
+            {"id":"global-network-policy","status":"fail","message":"not initialized"}
+          ]
+        }"#;
+        assert_eq!(
+            global_network_policy_state(uninitialized).unwrap(),
+            GlobalNetworkPolicyState::Uninitialized
+        );
+
+        let initialized = br#"{
+          "checks": [
+            {"id":"global-network-policy","status":"pass","message":"initialized"}
+          ]
+        }"#;
+        assert_eq!(
+            global_network_policy_state(initialized).unwrap(),
+            GlobalNetworkPolicyState::Initialized
+        );
+
+        let broken = br#"{
+          "checks": [
+            {"id":"global-network-policy","status":"fail","message":"database corrupt"}
+          ]
+        }"#;
+        let error = global_network_policy_state(broken).unwrap_err();
+        assert!(error.contains("database corrupt"));
+
+        let unexpected = br#"{
+          "checks": [
+            {"id":"global-network-policy","status":"warn","message":"unknown"}
+          ]
+        }"#;
+        assert!(global_network_policy_state(unexpected).is_err());
+
+        assert!(policy_list_is_initialized(br#"{"rules":[]}"#).is_ok());
+        assert!(policy_list_is_initialized(br#"[]"#).is_err());
+    }
+
+    #[test]
     fn parses_loopback_ephemeral_port_mapping() {
-        let json = include_bytes!("../tests/fixtures/sbx-ports-0.51.0.json");
-        assert_eq!(parse_published_host_port(json, 6768).unwrap(), 45678);
-        assert!(parse_published_host_port(json, 6767).is_err());
+        for (json, expected) in [
+            (
+                include_bytes!("../tests/fixtures/sbx-ports-0.51.0.json").as_slice(),
+                45678,
+            ),
+            (
+                include_bytes!("../tests/fixtures/sbx-ports-0.54.0.json").as_slice(),
+                45679,
+            ),
+        ] {
+            assert_eq!(parse_published_host_port(json, 6768).unwrap(), expected);
+            assert!(parse_published_host_port(json, 6767).is_err());
+        }
     }
 
     #[test]

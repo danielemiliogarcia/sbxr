@@ -156,7 +156,7 @@ mod tests {
             .find_map(|(name, descriptor)| (*name == "rust").then_some(*descriptor))
             .unwrap();
         assert!(
-            rust.contains("exec /home/agent/.cargo/bin/rustup run 1.99.1 rust-analyzer \"$@\"")
+            rust.contains("exec /home/agent/.cargo/bin/rustup run 1.100.0 rust-analyzer \"$@\"")
         );
         assert!(!rust.contains("rust-analyzer rustc rustdoc rustfmt rustup; do"));
     }

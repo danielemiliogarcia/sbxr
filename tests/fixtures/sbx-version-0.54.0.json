@@ -1,0 +1,12 @@
+{
+  "client": {
+    "version": "v0.54.0",
+    "revision": "fixture-client"
+  },
+  "server": {
+    "state": "running",
+    "version": "v0.54.0",
+    "revision": "fixture-server",
+    "api_version": "0.52.0"
+  }
+}

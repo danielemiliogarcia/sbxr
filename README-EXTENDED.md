@@ -93,7 +93,11 @@ API versions and probes the exact CLI capabilities it relies on. It starts a
 stopped on-demand daemon and waits up to 30 seconds for readiness. It rejects
 an old client or server, a daemon that cannot become ready, or a partially
 compatible command surface with an actionable error instead of guessing
-across releases.
+across releases. On Docker Sandboxes 0.54 and newer, lifecycle/setup commands
+also detect the one-time uninitialized global network-policy state. sbxr then
+selects Docker's `deny-all` baseline so only kit-declared and explicitly
+selected endpoints are reachable. It never replaces a policy that the user
+already initialized.
 
 To build `sbxr` or contribute a feature, see the
 [development guide](DEVELOPMENT.md).
@@ -105,7 +109,8 @@ The default `rust-multi-agent` preset combines:
 
 - Docker's digest-pinned official Kits v3 Codex workload and Claude mixin,
   with host-managed ChatGPT and Claude subscription OAuth;
-- pinned Rust 1.99.1 tooling, Cargo security tools, and a host-style colored,
+- pinned Rust 1.100.0 tooling, Cargo security tools, a default three-day Cargo
+  dependency cooldown, and a host-style colored,
   Git-aware Bash prompt, plus `nano`, Bash/Git completion, an explicit VS Code
   login-shell profile, and a generated `en_US.UTF-8` locale for clean remote
   terminals;
@@ -773,7 +778,7 @@ path, clone or unpack the reviewed revision and use
 
 `publish = false` prevents a misleading `cargo install sbxr` claim: no
 crates.io package exists. Tagged release binaries are built with the exact
-stable compiler recorded in `RUST_RELEASE_VERSION`, currently Rust 1.99.1,
+stable compiler recorded in `RUST_RELEASE_VERSION`, currently Rust 1.100.0,
 while `rust-version = 1.85` remains the tested minimum for source builders.
 Every release build uses `--offline --frozen` against the committed vendor
 tree, runs natively on its target GitHub-hosted runner, smoke-tests the binary
@@ -796,7 +801,9 @@ OpenSSH, Git, or KVM still receive explicit manual installation guidance.
 Passing `--prebuild` runs the same checks first and then warms only the generic
 local Kits v3 composition cache. It shifts composition work ahead of the first
 project, but fresh volume initialization and install-hook verification still
-occur when each project sandbox is created.
+occur when each project sandbox is created. If Docker's global network policy
+has never been initialized, setup selects `deny-all`; an existing `allow-all`,
+`balanced`, or `deny-all` choice remains untouched.
 
 The automated steps are equivalent to running these commands manually when
 their corresponding state is missing:
@@ -804,6 +811,7 @@ their corresponding state is missing:
 ```bash
 sbx login
 sbx secret set openai --oauth
+sbx policy init deny-all  # only when no global policy exists
 sbx setup ssh
 code --install-extension ms-vscode-remote.remote-ssh
 ```
@@ -1078,10 +1086,12 @@ validation status, see [PLATFORM_SUPPORT.md](PLATFORM_SUPPORT.md).
 
 ## Limitations
 
-Docker's `.sbxenv.yaml`/`sbx env` and Kits v3 interfaces remain evolving in
-Docker Sandboxes 0.51. sbxr centralizes those dependencies, validates both
-runtime sides and required capabilities, and keeps structured compatibility
-fixtures, but a future Docker release can still require a compatibility update.
+Docker's `.sbxenv.yaml`/`sbx env` and Kits v3 interfaces remain evolving. sbxr
+requires 0.51.0 or newer and is live-tested with Docker Sandboxes 0.54.0
+(client/server 0.54.0, API 0.52.0). It centralizes those dependencies,
+validates both runtime sides and required capabilities, and keeps structured
+compatibility fixtures, but a future Docker release can still require an
+update.
 
 After a microVM stop, VS Code Remote-SSH may restore terminal tabs but lose their scrollback due to a VS Code limitation/bug; [details and tested versions](PLATFORM_SUPPORT.md#vscode-state-across-a-microvm-stop).
 

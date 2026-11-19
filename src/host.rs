@@ -81,12 +81,17 @@ pub(crate) fn setup(preset: Preset, preserve_xdg_state: bool) -> Result<(), Stri
                 Err(error) => failures.push(error),
             }
         }
-        if let Err(error) = sbx::require_minimum_version(preserve_xdg_state) {
-            failures.push(error);
-        } else if let Err(error) = sbx::setup_ssh(preserve_xdg_state) {
-            failures.push(error);
-        } else {
-            println!("ok   Docker-managed *.sbx SSH configuration");
+        match sbx::require_minimum_version(preserve_xdg_state) {
+            Err(error) => failures.push(error),
+            Ok(version) => {
+                if let Err(error) = sbx::ensure_global_network_policy(preserve_xdg_state, version) {
+                    failures.push(error);
+                } else if let Err(error) = sbx::setup_ssh(preserve_xdg_state) {
+                    failures.push(error);
+                } else {
+                    println!("ok   Docker-managed *.sbx SSH configuration");
+                }
+            }
         }
     } else {
         failures.push(format!("sbx is missing\n{}", process::install_hint("sbx")));
@@ -194,7 +199,8 @@ pub(crate) fn setup(preset: Preset, preserve_xdg_state: bool) -> Result<(), Stri
 /// omit the volume-backed Rust toolchain and other persistent kit state.
 pub(crate) fn prebuild(context: &Context, preset: Preset) -> Result<(), String> {
     process::require("sbx")?;
-    sbx::require_minimum_version(context.preserve_xdg_state)?;
+    let version = sbx::require_minimum_version(context.preserve_xdg_state)?;
+    sbx::ensure_global_network_policy(context.preserve_xdg_state, version)?;
     cleanup_stale_prebuilds(context.preserve_xdg_state)?;
     let profile = crate::profile::Profile::default();
     let kits =

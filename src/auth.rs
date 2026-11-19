@@ -112,7 +112,19 @@ pub(crate) fn renew(
             println!(
                 "Complete Claude's interactive login. Docker must retain the reusable OAuth credential behind the host proxy."
             );
-            sandbox::run_remote(context, project, sandbox_name, &["claude", "auth", "login"])?;
+            let login =
+                sandbox::run_remote(context, project, sandbox_name, &["claude", "auth", "login"]);
+            let cleanup = sandbox::reassert_claude_proxy_sentinel(context, sandbox_name);
+            match (login, cleanup) {
+                (Ok(()), Ok(())) => {}
+                (Err(error), Ok(())) => return Err(error),
+                (Ok(()), Err(error)) => return Err(error),
+                (Err(login), Err(cleanup)) => {
+                    return Err(format!(
+                        "{login}\nAdditionally failed to restore the managed Claude sentinel: {cleanup}"
+                    ));
+                }
+            }
         }
         AuthProvider::GitHub => {
             process::require("gh")?;

@@ -5,7 +5,7 @@ use crate::{auth, envfile, git_trust, health, process, sandbox, sbx};
 use serde_json::Value;
 use std::process::Stdio;
 
-const PINNED_RUST_VERSION: &str = "1.99.1";
+const PINNED_RUST_VERSION: &str = "1.100.0";
 const PINNED_PI_VERSION: &str = "1.4.0";
 const PINNED_PASEO_VERSION: &str = "0.8.0";
 const PINNED_NODE_VERSION: &str = "22.23.4";
