@@ -13,7 +13,7 @@ Published releases are immutable.
 
 `RUST_RELEASE_VERSION` pins the exact stable compiler used for official
 artifacts. It should name the newest stable Rust version reviewed for the
-release; it is currently 1.99.1. Pinning the patch version prevents the
+release; it is currently 1.100.0. Pinning the patch version prevents the
 compiler input from silently changing when rebuilding a tag instead of allowing
 the `stable` channel to move later. This is controlled provenance, not a claim
 that archives are bit-for-bit reproducible across runner images.

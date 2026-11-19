@@ -37,6 +37,66 @@ do
 done
 "#;
 
+const REASSERT_CLAUDE_PROXY_SENTINEL: &str = r#"
+set -euo pipefail
+file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
+candidate=$file
+while [ "$candidate" != / ]; do
+  if [ -L "$candidate" ]; then
+    echo "refusing a symlinked Claude credential path" >&2
+    exit 1
+  fi
+  candidate=${candidate%/*}
+  [ -n "$candidate" ] || candidate=/
+done
+directory=${file%/*}
+mkdir -p -- "$directory"
+if [ -e "$file" ]; then
+  [ -f "$file" ] && [ "$(stat -c '%u' "$file")" = "$(id -u)" ] || {
+    echo "refusing an unsafe Claude credential file" >&2
+    exit 1
+  }
+fi
+python3 -I - "$file" <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+value = {
+    "claudeAiOauth": {
+        "accessToken": "sk-ant-oat01-proxy-managed",
+        "expiresAt": 4102444800000,
+        "refreshToken": "sk-ant-ort01-proxy-managed",
+        "scopes": [
+            "user:file_upload",
+            "user:inference",
+            "user:mcp_servers",
+            "user:plugins",
+            "user:profile",
+            "user:sessions:claude_code",
+        ],
+    }
+}
+temporary = path.with_name(f".{path.name}.sbxr-{os.getpid()}")
+descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    with os.fdopen(descriptor, "w") as output:
+        json.dump(value, output, separators=(",", ":"))
+        output.write("\n")
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, path)
+    os.chmod(path, 0o600)
+finally:
+    try:
+        temporary.unlink()
+    except FileNotFoundError:
+        pass
+PY
+"#;
+
 fn validate_kits(context: &Context) -> Result<(), String> {
     for name in embedded::KIT_NAMES {
         let spec = context.kit_root.join(name).join("spec.yaml");
@@ -151,6 +211,7 @@ pub(crate) fn ensure_dev(
     process::require("sbx")?;
     validate_kits(context)?;
     let sbx_version = sbx::require_minimum_version(context.preserve_xdg_state)?;
+    sbx::ensure_global_network_policy(context.preserve_xdg_state, sbx_version)?;
     let name = sandbox_name(project, profile);
     let kind = match profile.workspace {
         WorkspaceMode::Shared => envfile::Kind::Development(preset),
@@ -227,6 +288,9 @@ pub(crate) fn ensure_dev(
         state.agent = true;
         sync::write_bootstrap_state(name, context.preserve_xdg_state, state)?;
     }
+    if preset.has_claude() {
+        reassert_claude_proxy_sentinel(context, name)?;
+    }
     harden_credential_permissions(context, name)?;
     if profile.browser {
         browser::configure(context, name, preset)?;
@@ -234,6 +298,18 @@ pub(crate) fn ensure_dev(
     apply_network_profile(context, name, profile.network)?;
     configure_paseo_relay(context, name, profile.paseo_relay, force_sync)?;
     Ok(state)
+}
+
+pub(crate) fn reassert_claude_proxy_sentinel(
+    context: &Context,
+    sandbox_name: &str,
+) -> Result<(), String> {
+    process::run_checked(
+        sbx::exec_command(context.preserve_xdg_state)
+            .arg(sandbox_name)
+            .args(["--", "bash", "-lc", REASSERT_CLAUDE_PROXY_SENTINEL]),
+        "reasserting the Docker-managed Claude OAuth sentinel",
+    )
 }
 
 fn harden_credential_permissions(context: &Context, sandbox_name: &str) -> Result<(), String> {
@@ -513,7 +589,7 @@ for directory do
   cd -- "$directory"
   RUSTUP_AUTO_INSTALL=0 cargo --version >/dev/null
   RUSTUP_AUTO_INSTALL=0 rustc --version >/dev/null
-  RUSTUP_AUTO_INSTALL=0 rust-analyzer --version | grep -F 'rust-analyzer 1.99.1' >/dev/null
+  RUSTUP_AUTO_INSTALL=0 rust-analyzer --version | grep -F 'rust-analyzer 1.100.0' >/dev/null
 done
 "#;
     let mut command = sbx::exec_command(context.preserve_xdg_state);
@@ -693,6 +769,7 @@ pub(crate) fn ensure_review(
     process::require("git")?;
     validate_kits(context)?;
     let sbx_version = sbx::require_minimum_version(context.preserve_xdg_state)?;
+    sbx::ensure_global_network_policy(context.preserve_xdg_state, sbx_version)?;
     let git_status = Command::new("git")
         .arg("-C")
         .arg(&project.path)
@@ -1264,9 +1341,9 @@ pub(crate) fn network_profile_applied(
 #[cfg(test)]
 mod tests {
     use super::{
-        HARDEN_CREDENTIAL_PERMISSIONS, NetworkProfile, network_profile_enforced,
-        network_profile_enforced_excluding, not_stopped, owned_rule_matches, parse_network_rules,
-        policy_has_resource, project_toolchain_manifests,
+        HARDEN_CREDENTIAL_PERMISSIONS, NetworkProfile, REASSERT_CLAUDE_PROXY_SENTINEL,
+        network_profile_enforced, network_profile_enforced_excluding, not_stopped,
+        owned_rule_matches, parse_network_rules, policy_has_resource, project_toolchain_manifests,
     };
     use crate::envfile::SharedEnvironment;
     use std::path::PathBuf;
@@ -1487,6 +1564,63 @@ mod tests {
             .env_remove("CODEX_HOME")
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("PI_CODING_AGENT_DIR")
+            .status()
+            .unwrap();
+        assert!(!status.success());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reasserts_claude_sentinel_and_refuses_symlinks() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "sbxr-claude-sentinel-{}-{unique}",
+            std::process::id()
+        ));
+        let credentials = root.join(".claude/.credentials.json");
+        fs::create_dir_all(credentials.parent().unwrap()).unwrap();
+        fs::write(
+            &credentials,
+            br#"{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0,"scopes":[]}}"#,
+        )
+        .unwrap();
+
+        let status = Command::new("bash")
+            .args(["-lc", REASSERT_CLAUDE_PROXY_SENTINEL])
+            .env("HOME", &root)
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&credentials).unwrap()).unwrap();
+        assert_eq!(
+            value["claudeAiOauth"]["accessToken"],
+            "sk-ant-oat01-proxy-managed"
+        );
+        assert_eq!(
+            value["claudeAiOauth"]["refreshToken"],
+            "sk-ant-ort01-proxy-managed"
+        );
+        assert_eq!(
+            fs::metadata(&credentials).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let target = root.join("target.json");
+        fs::write(&target, b"{}\n").unwrap();
+        fs::remove_file(&credentials).unwrap();
+        symlink(&target, &credentials).unwrap();
+        let status = Command::new("bash")
+            .args(["-lc", REASSERT_CLAUDE_PROXY_SENTINEL])
+            .env("HOME", &root)
+            .env_remove("CLAUDE_CONFIG_DIR")
             .status()
             .unwrap();
         assert!(!status.success());

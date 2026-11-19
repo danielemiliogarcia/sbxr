@@ -1,7 +1,7 @@
 # syntax=docker/sandbox-kit:3
 schemaVersion: "3"
 kind: mixin
-version: "1.99.1-sbxr.1"
+version: "1.100.0-sbxr.1"
 displayName: Rust development toolchain
 description: A pinned stable Rust toolchain with rustfmt, Clippy, rust-src, rust-analyzer, LLDB, cargo-vet, cargo-deny, and cargo-audit.
 sourceUrl: https://github.com/docker/sbx-kits-contrib
@@ -14,6 +14,12 @@ capabilities:
           - deb.debian.org
           - dhi.io
           - download.docker.com:443
+          # Public nested-Docker pulls. Docker Hub currently redirects image
+          # blobs through CloudFront, so all three hosts are required under
+          # sbxr's deny-all global network baseline.
+          - registry-1.docker.io:443
+          - auth.docker.io:443
+          - production.cloudfront.docker.com:443
           - static.rust-lang.org:443
           - index.crates.io:443
           - static.crates.io:443
@@ -99,13 +105,13 @@ capabilities:
               rm -f /tmp/rustup-init
             fi
 
-            rustup toolchain install 1.99.1 --profile minimal
-            rustup component add --toolchain 1.99.1 rustfmt clippy rust-src rust-analyzer
-            rustup default 1.99.1
+            rustup toolchain install 1.100.0 --profile minimal
+            rustup component add --toolchain 1.100.0 rustfmt clippy rust-src rust-analyzer
+            rustup default 1.100.0
             rustc --version
             cargo --version
           user: "1000"
-          description: Install rustup 1.29.0 and pinned Rust 1.99.1 components
+          description: Install rustup 1.29.0 and pinned Rust 1.100.0 components
 
         # Keep source builds in separate hooks: sbx bounds each install hook's
         # execution time. The job setting applies only while provisioning, not to
@@ -177,7 +183,7 @@ capabilities:
             # Cargo select each project's compiler toolchain.
             cat > /usr/local/bin/rust-analyzer <<'SBXR_RUST_ANALYZER'
             #!/bin/sh
-            exec /home/agent/.cargo/bin/rustup run 1.99.1 rust-analyzer "$@"
+            exec /home/agent/.cargo/bin/rustup run 1.100.0 rust-analyzer "$@"
             SBXR_RUST_ANALYZER
             chmod 0755 /usr/local/bin/rust-analyzer
           user: "0"

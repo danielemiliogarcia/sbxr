@@ -251,7 +251,10 @@ platform integration.
 The Kits v3 composition requires `sbx 0.51.0` or newer. The earlier
 declarative environment work was verified against `sbx 0.39.0`; sbxr retains
 the structured-output and flag compatibility introduced in `sbx 0.48.0`, but
-those older releases cannot load the current Kits v3 contract:
+those older releases cannot load the current Kits v3 contract. The current
+live compatibility baseline is client/server `sbx 0.54.0` with API `0.52.0`;
+fixtures cover both the minimum 0.51 list/port/version shapes and the 0.54
+`port ls` surface:
 
 - detached `sbx env run` created a fresh environment and reconciled a
   contract-matched existing one without opening an interactive shell;

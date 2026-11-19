@@ -11,7 +11,7 @@ Most rows below follow from that difference.
 
 ## Feature and architecture comparison
 
-| Area | sbxr 0.3.8 | sbx-suite | Practical difference |
+| Area | sbxr 0.3.10 | sbx-suite | Practical difference |
 |---|---|---|---|
 | Primary goal | Fast, personalized, project-scoped Rust development | Mountless, controlled AI-agent environment; also specialized for Acrux | sbxr prioritizes daily developer comfort; sbx-suite prioritizes separation |
 | Host launcher | Native Rust executable | Python 3.10+ scripts using only the standard library | sbxr needs no host Rust when installed from a release; sbx-suite needs Python |
@@ -24,7 +24,7 @@ Most rows below follow from that difference.
 | Durability | Shared mode leaves source and Git history directly on the host | Work must be pushed or copied out before sandbox deletion | sbxr is safer against accidental sandbox deletion |
 | Image architecture | Digest-pinned official workloads plus composable Kits v3 and a local content-addressed cache | Custom full image derived from pinned `shell-docker`; build locally, publish to GHCR, or reuse by digest | sbxr is modular and personalized after creation; sbx-suite is more image-centric |
 | Host personalization | Bash aliases, `~/bin`, prompt, Zsh/Fish, agent configuration, plugins and compatible VS Code extensions | Deliberately avoids mounting or mirroring host configuration | sbxr feels like the developer's machine; sbx-suite has a smaller trusted-input surface |
-| Rust | Rust 1.99.1 plus automatic nested `rust-toolchain` discovery, installation, components and verification | Shared pinned Rust 1.99.1 toolchain | sbxr is better for repositories containing multiple toolchains |
+| Rust | Rust 1.100.0 plus automatic nested `rust-toolchain` discovery, installation, components and verification | Shared pinned Rust 1.99.1 toolchain | sbxr is better for repositories containing multiple toolchains |
 | Agents and orchestration | Codex, Claude, Pi, Paseo, and optional Orca Server/Desktop integration | Codex, Claude, Pi, and Paseo | Both cover the core agents; Orca integration is specific to sbxr |
 | OpenAI credentials | Docker host OAuth with exact guest sentinels | Docker host OAuth with exact guest sentinels | Equivalent credential-value protection |
 | Claude credentials | Docker-captured native OAuth, retained on the host | Host-generated subscription token stored by sbx and injected through the proxy | Both keep reusable Claude credentials outside the guest |

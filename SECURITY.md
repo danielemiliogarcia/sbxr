@@ -12,6 +12,14 @@ unsupported-secret boundaries are described in
 - Builds, build scripts, procedural macros, tests, binaries, and agents run in
   a project-specific microVM rather than directly on the host.
 - Projects receive separate persistent Cargo caches.
+- Cargo 1.100's native minimum-publish-age resolver defaults to three days in
+  sbxr's own repository and development sandboxes. This holds newly published
+  registry versions out of fresh resolution while preserving versions already
+  reviewed and locked; project-local Cargo configuration can override it.
+- When Docker has no global network policy yet, sbxr initializes its one-time
+  baseline to `deny-all`; an existing user-selected global policy is never
+  replaced. Selected Kits v3 then declare the endpoints required for Rust,
+  agents, GitHub, VS Code, public nested-Docker pulls, and optional features.
 - Kit-declared endpoints describe required provisioning/runtime destinations.
   Optional `restricted` and `offline` profiles add sandbox-scoped deny rules
   after bootstrap without modifying host-global policy. Exact sbxr-owned rule
@@ -59,8 +67,9 @@ unsupported-secret boundaries are described in
 - Docker's credential proxy keeps the real ChatGPT, Claude, and GitHub tokens
   outside the VM. Codex, Claude, Pi, Git/gh, and optional GHCR access receive
   only host-scoped sentinels or proxy-injected requests.
-  Each sbxr launch reasserts Pi's managed provider entries, so guest login
-  state cannot persistently replace those sentinels with reusable OAuth values.
+  Each sbxr launch reasserts Claude's and Pi's managed provider entries, so a
+  failed refresh or guest login state cannot persistently replace those
+  sentinels with empty or reusable OAuth values.
   Reconciliation also validates the known managed store paths and normalizes
   the Codex, Claude, and Pi sentinel files to guest-private `0600` mode.
 - The guest audit accepts only exact managed Codex/Pi schemas, includes

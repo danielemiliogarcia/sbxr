@@ -1,5 +1,69 @@
 # Changelog
 
+## [0.3.10] - 2026-11-18
+
+### Security
+
+- Cargo 1.100's native minimum-publish-age resolver is enabled with a three-day
+  default both for this repository and inside development sandboxes. Newly
+  published registry versions are therefore held back during resolution while
+  reviewed versions already recorded in `Cargo.lock` remain usable. An explicit
+  user or project Cargo setting is preserved.
+- Docker Sandboxes 0.54 requires a one-time global network-policy choice before
+  the first environment can be created. Setup, prebuild, development, isolated,
+  and review flows now detect the exact structured `not initialized` state and
+  initialize Docker's `deny-all` baseline. Any existing user-selected global
+  policy is preserved.
+- Claude's guest OAuth file is atomically restored to Docker's exact non-secret
+  access/refresh sentinel schema on every launch and after attempted renewal,
+  including cancelled or failed login. This prevents an expired refresh from
+  leaving empty or reusable provider credentials in a persistent guest volume;
+  symlink, ownership, type, schema, and private-permission checks still fail
+  closed.
+- The Rust kit now declares Docker's documented registry, authentication, and
+  image-CDN endpoints so ordinary public nested-Docker pulls work under the new
+  deny-all baseline without broadening the rest of the guest network policy.
+
+### Changed
+
+- Added Docker Sandboxes 0.54 structured version/list/port fixtures and switched
+  0.54+ hosts to the non-deprecated `sbx port ls` command while retaining the
+  0.51–0.53 `sbx ports` compatibility path.
+- Bumped both the default sandbox toolchain and the exact official-release
+  compiler from Rust 1.99.1 to Rust 1.100.0. Nested project
+  `rust-toolchain.toml` discovery and independent pinned rust-analyzer selection
+  remain unchanged; the source-build MSRV remains Rust 1.85.
+- Added repository-level agent/contributor instructions covering the security
+  boundary, mandatory offline and live gates, disposable test paths, release
+  authority, and the audible YubiKey-touch handoff.
+
+### Fixed
+
+- `sbx diagnose --format json` failures now retain their structured check array,
+  allowing doctor and policy initialization to report the actual failed check
+  instead of discarding useful JSON solely because the command exited nonzero.
+- Normal launches use the cheap structured policy-list fast path; the full
+  Docker diagnostic collector runs only while distinguishing an uninitialized
+  or broken policy. Concurrent first launches re-read state so a one-time
+  initialization race is harmless.
+
+### Tests
+
+- Added parser coverage for Docker Sandboxes 0.54, strict unexpected-policy
+  statuses, initialized-policy list shape, the new port-command boundary, and
+  Claude sentinel restoration/refusal of symlinked stores.
+- Live-tested fresh creation, unattended reuse, stop/start, four nested Rust
+  toolchains, GitHub API and forwarded SSH, Paseo, loopback-only Orca pairing,
+  and a nested Docker container with Docker Sandboxes client/server 0.54.0 and
+  API 0.52.0. Existing 0.51 remains the declared minimum.
+
+### Upgrade notes
+
+- Existing development sandboxes require recreation because the Rust 1.100.0
+  kit and its network declaration are creation-contract inputs. `sbxr` detects
+  the drift and prints the exact removal/recreation command; host project files
+  remain untouched.
+
 ## [0.3.9] - 2026-11-10
 
 ### Fixed

@@ -1,0 +1,23 @@
+[
+  {
+    "name": "rust-multi-fixture-054",
+    "id": "00000000-0000-0000-0000-000000000054",
+    "agent": "codex",
+    "status": "running",
+    "ports": [
+      {
+        "host_ip": "127.0.0.1",
+        "host_port": 45679,
+        "sandbox_port": 6768,
+        "protocol": "tcp4"
+      }
+    ],
+    "mounts": [
+      "/tmp/sbxr-fixture:/tmp/sbxr-fixture"
+    ],
+    "workspaces": [
+      "/tmp/sbxr-fixture"
+    ],
+    "detached": true
+  }
+]

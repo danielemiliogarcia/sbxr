@@ -42,13 +42,13 @@ pub(crate) fn configure(
 ) -> Result<(), String> {
     ensure_github_policy(context, sandbox_name)?;
     install_sandbox_git_integration(context, sandbox_name)?;
-    configure_cargo_git_cli(context, sandbox_name)?;
+    configure_cargo_defaults(context, sandbox_name)?;
     mirror_host_github_rewrites(context, sandbox_name, project)?;
     mirror_host_git_settings(context, sandbox_name, project)?;
     Ok(())
 }
 
-fn configure_cargo_git_cli(context: &Context, sandbox_name: &str) -> Result<(), String> {
+fn configure_cargo_defaults(context: &Context, sandbox_name: &str) -> Result<(), String> {
     let path = "/home/agent/.cargo/config.toml";
     let current = sbx::read_file(context.preserve_xdg_state, sandbox_name, path)?;
     let current = match current {
@@ -56,7 +56,7 @@ fn configure_cargo_git_cli(context: &Context, sandbox_name: &str) -> Result<(), 
             .map_err(|error| format!("sandbox Cargo config is not UTF-8: {error}"))?,
         None => String::new(),
     };
-    let updated = cargo_config_with_git_cli(&current);
+    let updated = cargo_config_with_defaults(&current);
     if updated.trim_end() != current.trim_end() {
         sbx::write_file(
             context.preserve_xdg_state,
@@ -64,9 +64,14 @@ fn configure_cargo_git_cli(context: &Context, sandbox_name: &str) -> Result<(), 
             path,
             OsStr::new(&updated),
         )?;
-        println!("==> configured Cargo Git dependencies to use the forwarded SSH agent");
+        println!("==> configured Cargo Git dependencies and the default 3-day cooldown");
     }
     Ok(())
+}
+
+fn cargo_config_with_defaults(contents: &str) -> String {
+    let with_git_cli = cargo_config_with_git_cli(contents);
+    cargo_config_with_min_publish_age(&with_git_cli)
 }
 
 fn cargo_config_with_git_cli(contents: &str) -> String {
@@ -109,6 +114,42 @@ fn cargo_config_with_git_cli(contents: &str) -> String {
             lines.push(String::new());
         }
         lines.extend(["[net]".to_owned(), "git-fetch-with-cli = true".to_owned()]);
+    }
+    lines.join("\n")
+}
+
+fn cargo_config_with_min_publish_age(contents: &str) -> String {
+    let mut lines = contents.lines().map(str::to_owned).collect::<Vec<_>>();
+    let mut section = "";
+    let mut registry_header = None;
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            section = trimmed;
+            if section == "[registry]" {
+                registry_header = Some(index);
+            }
+            continue;
+        }
+        let key = trimmed.split_once('=').map(|(key, _)| key.trim());
+        if (section.is_empty() && key == Some("registry.global-min-publish-age"))
+            || (section == "[registry]" && key == Some("global-min-publish-age"))
+        {
+            // A project or developer may deliberately choose another window.
+            // The sbxr value is a default, not a forced policy.
+            return lines.join("\n");
+        }
+    }
+    if let Some(index) = registry_header {
+        lines.insert(index + 1, "global-min-publish-age = \"3 days\"".to_owned());
+    } else {
+        if lines.last().is_some_and(|line| !line.trim().is_empty()) {
+            lines.push(String::new());
+        }
+        lines.extend([
+            "[registry]".to_owned(),
+            "global-min-publish-age = \"3 days\"".to_owned(),
+        ]);
     }
     lines.join("\n")
 }
@@ -539,22 +580,34 @@ mod tests {
     }
 
     #[test]
-    fn enables_cargo_git_cli_without_discarding_other_configuration() {
+    fn configures_cargo_defaults_without_discarding_other_configuration() {
         assert_eq!(
-            cargo_config_with_git_cli(""),
-            "[net]\ngit-fetch-with-cli = true"
+            cargo_config_with_defaults(""),
+            "[net]\ngit-fetch-with-cli = true\n\n[registry]\nglobal-min-publish-age = \"3 days\""
         );
         assert_eq!(
-            cargo_config_with_git_cli("[build]\njobs = 4"),
-            "[build]\njobs = 4\n\n[net]\ngit-fetch-with-cli = true"
+            cargo_config_with_defaults("[build]\njobs = 4"),
+            "[build]\njobs = 4\n\n[net]\ngit-fetch-with-cli = true\n\n[registry]\nglobal-min-publish-age = \"3 days\""
         );
         assert_eq!(
-            cargo_config_with_git_cli("[net]\nretry = 3\ngit-fetch-with-cli = false"),
-            "[net]\nretry = 3\ngit-fetch-with-cli = true"
+            cargo_config_with_defaults("[net]\nretry = 3\ngit-fetch-with-cli = false"),
+            "[net]\nretry = 3\ngit-fetch-with-cli = true\n\n[registry]\nglobal-min-publish-age = \"3 days\""
         );
         assert_eq!(
-            cargo_config_with_git_cli("net.git-fetch-with-cli = false\n[build]\njobs = 4"),
-            "net.git-fetch-with-cli = true\n[build]\njobs = 4"
+            cargo_config_with_defaults("net.git-fetch-with-cli = false\n[build]\njobs = 4"),
+            "net.git-fetch-with-cli = true\n[build]\njobs = 4\n\n[registry]\nglobal-min-publish-age = \"3 days\""
+        );
+        assert_eq!(
+            cargo_config_with_defaults(
+                "[registry]\nglobal-min-publish-age = \"7 days\"\n[net]\nretry = 2"
+            ),
+            "[registry]\nglobal-min-publish-age = \"7 days\"\n[net]\ngit-fetch-with-cli = true\nretry = 2"
+        );
+        assert_eq!(
+            cargo_config_with_defaults(
+                "registry.global-min-publish-age = \"1 day\"\n[net]\ngit-fetch-with-cli = true"
+            ),
+            "registry.global-min-publish-age = \"1 day\"\n[net]\ngit-fetch-with-cli = true"
         );
     }
 }

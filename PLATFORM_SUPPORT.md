@@ -9,7 +9,7 @@ that the code is designed to support but which still need live validation.
 
 | Host platform | `sbxr` status | Notes |
 |---|---|---|
-| Linux Mint 22.3, x86-64 | Tested | Live development and kit validation have passed; Docker does not officially support Ubuntu derivatives |
+| Linux Mint 22.3, x86-64 | Tested | Live development and kit validation passed with Docker Sandboxes client/server 0.54.0 (API 0.52.0); Docker does not officially support Ubuntu derivatives |
 | Ubuntu 24.04+, x86-64 or ARM64 | Expected | Supported by Docker Sandboxes; dedicated `sbxr` validation is pending |
 | macOS 14+ on Apple silicon | Expected | Supported by Docker Sandboxes; dedicated `sbxr` validation is pending |
 | Windows 11, x86-64 | Expected | Supported by Docker Sandboxes; dedicated `sbxr` validation is pending |
@@ -41,7 +41,9 @@ installing because its supported versions and commands can change.
 sbxr checks the Docker client and server independently and probes the required
 Kits v3, environment, skills, and structured-port command capabilities before
 lifecycle work; a new client connected to an old server is not considered a
-supported installation.
+supported installation. The structured compatibility fixtures and current
+Linux live run cover both the minimum 0.51 surface and 0.54's non-deprecated
+`sbx port ls` command.
 
 After installing the host prerequisites, the common setup is:
 
